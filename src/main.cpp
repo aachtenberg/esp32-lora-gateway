@@ -1,0 +1,124 @@
+#include <Arduino.h>
+#include <WiFi.h>
+#include <ArduinoOTA.h>
+#include "device_config.h"
+#include "lora_config.h"
+#include "version.h"
+#include "secrets.h"
+#include "lora_receiver.h"
+#include "mqtt_bridge.h"
+#include "wifi_manager.h"
+#include "device_registry.h"
+
+#ifdef OLED_ENABLED
+#include "display_manager.h"
+#endif
+
+// FreeRTOS task handles
+TaskHandle_t loraRxTaskHandle = NULL;
+TaskHandle_t mqttTaskHandle = NULL;
+
+void setup() {
+    Serial.begin(115200);
+    delay(100);
+
+    Serial.println("\n\n====================================");
+    Serial.println("ESP32 LoRa Gateway - Startup");
+    Serial.println("====================================");
+    Serial.printf("Firmware: %s\n", getFirmwareVersion().c_str());
+    Serial.printf("Build: %s %s\n", BUILD_DATE, BUILD_TIME);
+
+#ifdef OLED_ENABLED
+    // Initialize OLED display
+    Serial.println("Initializing OLED display...");
+    initDisplay();
+    displayStartup(getFirmwareVersion().c_str());
+#endif
+
+    // Initialize WiFi
+    Serial.println("\nConnecting to WiFi...");
+    if (!initWiFi()) {
+        Serial.println("ERROR: WiFi initialization failed");
+        displayError("WiFi Failed!");
+        delay(5000);
+        ESP.restart();
+    }
+
+    Serial.printf("Connected! IP: %s\n", WiFi.localIP().toString().c_str());
+
+    // Initialize OTA updates
+    Serial.println("Initializing OTA updates...");
+    ArduinoOTA.setHostname("esp32-lora-gateway");
+    ArduinoOTA.setPassword(OTA_PASSWORD);
+
+    ArduinoOTA.onStart([]() {
+        Serial.println("OTA update starting...");
+    });
+
+    ArduinoOTA.onEnd([]() {
+        Serial.println("\nOTA update complete!");
+    });
+
+    ArduinoOTA.onError([](ota_error_t error) {
+        Serial.printf("OTA Error[%u]: ", error);
+    });
+
+    ArduinoOTA.begin();
+
+    // Initialize device registry
+    Serial.println("Initializing device registry...");
+    initDeviceRegistry();
+
+    // Initialize MQTT bridge
+    Serial.println("Initializing MQTT bridge...");
+    if (!initMqttBridge()) {
+        Serial.println("WARNING: MQTT initialization failed");
+        // Continue anyway - will retry in loop
+    }
+
+    // Initialize LoRa receiver
+    Serial.println("Initializing LoRa receiver...");
+    if (!initLoRaReceiver()) {
+        Serial.println("ERROR: LoRa initialization failed!");
+        displayError("LoRa Failed!");
+        delay(5000);
+        ESP.restart();
+    }
+
+    // Create FreeRTOS tasks on separate cores
+    Serial.println("\nStarting dual-core tasks...");
+
+    // Core 0: LoRa RX (high priority, minimal latency)
+    xTaskCreatePinnedToCore(
+        loraRxTask,           // Task function
+        "LoRaRX",             // Task name
+        8192,                 // Stack size
+        NULL,                 // Parameters
+        2,                    // Priority (higher than MQTT)
+        &loraRxTaskHandle,    // Task handle
+        0                     // Core 0
+    );
+
+    // Core 1: MQTT + WiFi + OTA + Display
+    xTaskCreatePinnedToCore(
+        mqttTask,             // Task function
+        "MQTT",               // Task name
+        8192,                 // Stack size
+        NULL,                 // Parameters
+        1,                    // Priority
+        &mqttTaskHandle,      // Task handle
+        1                     // Core 1
+    );
+
+    Serial.println("Gateway startup complete!");
+    Serial.println("====================================\n");
+}
+
+void loop() {
+    // Main loop runs on Core 1
+    // Handle OTA updates
+    ArduinoOTA.handle();
+
+    // Small delay to prevent watchdog
+    delay(10);
+}
