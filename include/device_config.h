@@ -6,18 +6,25 @@
 // ====================================================================
 
 // SX1262 LoRa Module Pins (SPI Interface)
-// IMPORTANT: Verify these against your specific ESP32 LoRa module datasheet
-#define LORA_MISO      19   // SPI MISO
-#define LORA_MOSI      27   // SPI MOSI
-#define LORA_SCK       5    // SPI Clock
-#define LORA_NSS       18   // Chip Select (SS)
-#define LORA_DIO1      26   // IRQ Pin (DIO1)
-#define LORA_BUSY      23   // Busy Pin
-#define LORA_RST       14   // Reset Pin
+// Heltec WiFi LoRa 32 V3 (ESP32-S3) with built-in SX1262
+#define LORA_MISO      11   // Built-in SX1262 MISO
+#define LORA_MOSI      10   // Built-in SX1262 MOSI
+#define LORA_SCK       9    // Built-in SX1262 SCK
+#define LORA_NSS       8    // Built-in SX1262 NSS (Chip Select)
+#define LORA_DIO1      14   // Built-in SX1262 DIO1 (IRQ)
+#define LORA_BUSY      13   // Built-in SX1262 BUSY
+#define LORA_RST       12   // Built-in SX1262 RST
 
-// OLED Display (I2C)
-#define OLED_SDA       21   // I2C SDA
-#define OLED_SCL       22   // I2C SCL
+// Heltec-specific: Vext power control for LoRa and OLED
+// Vext must be LOW to enable power to peripherals
+#ifndef VEXT_CTRL
+#define VEXT_CTRL      36   // Vext control pin (LOW = ON, HIGH = OFF)
+#endif
+
+// OLED Display (I2C - Built-in on board)
+#define OLED_SDA       17   // Built-in OLED SDA
+#define OLED_SCL       18   // Built-in OLED SCL
+#define OLED_RST       21   // Built-in OLED Reset
 #define OLED_ADDR      0x3C // Standard I2C address for SSD1306
 
 // Status LED (optional)

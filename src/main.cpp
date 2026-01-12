@@ -9,10 +9,7 @@
 #include "mqtt_bridge.h"
 #include "wifi_manager.h"
 #include "device_registry.h"
-
-#ifdef OLED_ENABLED
 #include "display_manager.h"
-#endif
 
 // FreeRTOS task handles
 TaskHandle_t loraRxTaskHandle = NULL;
@@ -112,12 +109,36 @@ void setup() {
 
     Serial.println("Gateway startup complete!");
     Serial.println("====================================\n");
+
+#ifdef OLED_ENABLED
+    displayStatus(0, getDeviceCount());
+#endif
 }
 
 void loop() {
     // Main loop runs on Core 1
     // Handle OTA updates
     ArduinoOTA.handle();
+
+    // Check WiFi connection
+    static uint32_t lastWiFiCheck = 0;
+    if (millis() - lastWiFiCheck > 30000) {  // Check every 30 seconds
+        lastWiFiCheck = millis();
+        if (!isWiFiConnected()) {
+            Serial.println("WiFi disconnected, reconnecting...");
+            reconnectWiFi();
+        }
+    }
+
+#ifdef OLED_ENABLED
+    // Update display periodically
+    static uint32_t lastDisplayUpdate = 0;
+    if (millis() - lastDisplayUpdate > 1000) {  // Update every second
+        lastDisplayUpdate = millis();
+        // packets argument is ignored in favor of LoRa debug counters when available
+        displayStatus(0, getDeviceCount());
+    }
+#endif
 
     // Small delay to prevent watchdog
     delay(10);

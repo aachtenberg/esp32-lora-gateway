@@ -3,6 +3,8 @@
 
 #include <Arduino.h>
 #include "lora_protocol.h"
+#include <freertos/FreeRTOS.h>
+#include <freertos/queue.h>
 
 // Received packet structure (header + payload + metadata)
 struct ReceivedPacket {
@@ -24,5 +26,8 @@ bool sendAck(uint64_t deviceId, uint16_t seqNum, bool success, int8_t rssi, int8
 
 // Send command to sensor
 bool sendCommand(uint64_t deviceId, const CommandPayload* cmd);
+
+// Get packet queue handle (for MQTT task)
+QueueHandle_t getPacketQueue();
 
 #endif // LORA_RECEIVER_H

@@ -12,4 +12,7 @@ bool isWiFiConnected();
 // Reconnect to WiFi if disconnected
 bool reconnectWiFi();
 
+// Get configured device name
+String getDeviceName();
+
 #endif // WIFI_MANAGER_H
