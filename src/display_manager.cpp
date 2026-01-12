@@ -14,6 +14,9 @@ static uint32_t packetsReceived = 0;
 static int16_t lastRssi = 0;
 static String lastDevice = "";
 
+// Mutex for display rendering (to prevent corruption from concurrent access)
+static portMUX_TYPE displayMux = portMUX_INITIALIZER_UNLOCKED;
+
 // LoRa debug state (updated from LoRa RX task; rendered from main loop)
 static portMUX_TYPE loraDbgMux = portMUX_INITIALIZER_UNLOCKED;
 static uint32_t loraOk = 0;
@@ -230,6 +233,9 @@ void displayStatus(uint32_t packets, int deviceCount) {
     memcpy(hdr, loraLastHdr, 4);
     portEXIT_CRITICAL(&loraDbgMux);
     
+    // Lock display for rendering
+    portENTER_CRITICAL(&displayMux);
+    
     display->clearBuffer();
     
     // Title
@@ -267,6 +273,7 @@ void displayStatus(uint32_t packets, int deviceCount) {
     }
     
     display->sendBuffer();
+    portEXIT_CRITICAL(&displayMux);
 }
 
 /**
@@ -278,6 +285,7 @@ void displayPacketReceived(uint64_t deviceId, float temp, float humidity, int16_
     packetsReceived++;
     lastRssi = rssi;
     
+    portENTER_CRITICAL(&displayMux);
     display->clearBuffer();
     display->setFont(u8g2_font_ncenB08_tr);
     display->drawStr(0, 10, "Packet RX");
@@ -301,6 +309,7 @@ void displayPacketReceived(uint64_t deviceId, float temp, float humidity, int16_
     display->drawStr(0, 58, buffer);
     
     display->sendBuffer();
+    portEXIT_CRITICAL(&displayMux);
 }
 
 /**
@@ -318,6 +327,7 @@ void displayPacket(const char* deviceName, int16_t rssi, int8_t snr) {
 void displayError(const char* error) {
     if (display == nullptr) return;
     
+    portENTER_CRITICAL(&displayMux);
     display->clearBuffer();
     
     display->setFont(u8g2_font_ncenB10_tr);
@@ -327,6 +337,7 @@ void displayError(const char* error) {
     display->drawStr(5, 40, error);
     
     display->sendBuffer();
+    portEXIT_CRITICAL(&displayMux);
 }
 
 /**
