@@ -369,3 +369,24 @@ bool sendCommand(uint64_t deviceId, const CommandPayload* cmd) {
 QueueHandle_t getPacketQueue() {
     return rxPacketQueue;
 }
+
+/**
+ * Get radio instance for transmission
+ */
+SX1262* getRadio() {
+    return radio;
+}
+
+/**
+ * Get gateway ID
+ */
+uint64_t getGatewayId() {
+    return gatewayId;
+}
+
+/**
+ * Check if radio is initialized
+ */
+bool isRadioInitialized() {
+    return radio != nullptr;
+}

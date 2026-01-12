@@ -5,6 +5,7 @@
 #include "lora_protocol.h"
 #include <freertos/FreeRTOS.h>
 #include <freertos/queue.h>
+#include <RadioLib.h>
 
 // Received packet structure (header + payload + metadata)
 struct ReceivedPacket {
@@ -24,8 +25,14 @@ void loraRxTask(void* parameter);
 // Send ACK to sensor
 bool sendAck(uint64_t deviceId, uint16_t seqNum, bool success, int8_t rssi, int8_t snr);
 
-// Send command to sensor
-bool sendCommand(uint64_t deviceId, const CommandPayload* cmd);
+// Get radio instance for transmission
+SX1262* getRadio();
+
+// Get gateway ID
+uint64_t getGatewayId();
+
+// Check if radio is initialized
+bool isRadioInitialized();
 
 // Get packet queue handle (for MQTT task)
 QueueHandle_t getPacketQueue();
