@@ -10,6 +10,7 @@
 #include "wifi_manager.h"
 #include "device_registry.h"
 #include "display_manager.h"
+#include "command_tester.h"
 
 // FreeRTOS task handles
 TaskHandle_t loraRxTaskHandle = NULL;
@@ -117,6 +118,9 @@ void setup() {
 
 void loop() {
     // Main loop runs on Core 1
+    // Handle serial commands for testing
+    handleSerialCommands();
+
     // Handle OTA updates
     ArduinoOTA.handle();
 
