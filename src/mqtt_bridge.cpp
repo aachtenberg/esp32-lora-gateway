@@ -3,6 +3,7 @@
 #include "lora_receiver.h"
 #include "device_config.h"
 #include "secrets.h"
+#include "command_sender.h"
 #include <PubSubClient.h>
 #include <WiFi.h>
 #include <ArduinoJson.h>
@@ -272,6 +273,12 @@ void publishEvent(const ReceivedPacket* packet) {
 
 /**
  * MQTT callback for incoming commands
+ * Expected JSON format:
+ * {
+ *   "device_id": "f09e9e76aec4",
+ *   "action": "set_interval",  // or "set_sleep", "restart", "status"
+ *   "value": 90                // optional, for set_interval/set_sleep
+ * }
  */
 void mqttCallback(char* topic, byte* payload, unsigned int length) {
     Serial.printf("\n[MQTT] Message received on topic: %s\n", topic);
@@ -287,37 +294,59 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     
     // Extract command details
     const char* targetDeviceStr = doc["device_id"];
-    uint8_t cmdType = doc["command"];
+    const char* action = doc["action"];
     
-    if (targetDeviceStr == nullptr) {
-        Serial.println("❌ Missing device_id in command");
+    if (targetDeviceStr == nullptr || action == nullptr) {
+        Serial.println("❌ Missing device_id or action in command");
         return;
     }
     
-    // Parse device ID
+    // Parse device ID (hex string to uint64_t)
     uint64_t targetDevice = strtoull(targetDeviceStr, nullptr, 16);
     
-    Serial.printf("Command: 0x%02X for device: 0x%016llX\n", cmdType, targetDevice);
+    Serial.printf("[MQTT CMD] Action: %s for device: 0x%016llX\n", action, targetDevice);
     
-    // Build command payload
-    CommandPayload cmd;
-    cmd.cmdType = cmdType;
-    cmd.paramLen = 0;
+    bool success = false;
     
-    // Add parameters based on command type
-    if (cmdType == CMD_SET_BASELINE && doc.containsKey("baseline")) {
-        uint32_t baseline = doc["baseline"];
-        memcpy(cmd.params, &baseline, sizeof(baseline));
-        cmd.paramLen = sizeof(baseline);
-    } else if (cmdType == CMD_SET_SLEEP && doc.containsKey("sleep_seconds")) {
-        uint16_t sleepSec = doc["sleep_seconds"];
-        memcpy(cmd.params, &sleepSec, sizeof(sleepSec));
-        cmd.paramLen = sizeof(sleepSec);
+    // Route to appropriate command sender
+    if (strcmp(action, "set_interval") == 0) {
+        uint32_t seconds = doc["value"] | 30;  // Default 30 seconds
+        Serial.printf("  Setting sensor interval to %lu seconds\n", seconds);
+        success = sendSetIntervalCommand(targetDevice, seconds);
+        
+    } else if (strcmp(action, "set_sleep") == 0) {
+        uint32_t seconds = doc["value"] | 900;  // Default 15 minutes
+        Serial.printf("  Setting deep sleep to %lu seconds\n", seconds);
+        success = sendSetSleepCommand(targetDevice, seconds);
+        
+    } else if (strcmp(action, "restart") == 0) {
+        Serial.println("  Sending restart command");
+        success = sendRestartCommand(targetDevice);
+        
+    } else if (strcmp(action, "status") == 0) {
+        Serial.println("  Requesting status update");
+        success = sendStatusCommand(targetDevice);
+        
+    } else {
+        Serial.printf("❌ Unknown action: %s\n", action);
+        return;
     }
     
-    // Send command via LoRa
-    extern bool sendCommand(uint64_t deviceId, const CommandPayload* cmd);
-    if (sendCommand(targetDevice, &cmd)) {
+    // Publish result
+    if (success) {
+        Serial.println("✅ Command sent via LoRa");
+        // Optionally publish ACK back to MQTT
+        char ackTopic[64];
+        snprintf(ackTopic, sizeof(ackTopic), "lora/command/ack");
+        char ackPayload[128];
+        snprintf(ackPayload, sizeof(ackPayload), 
+                 "{\"device_id\":\"%s\",\"action\":\"%s\",\"status\":\"sent\"}", 
+                 targetDeviceStr, action);
+        mqttClient.publish(ackTopic, ackPayload);
+    } else {
+        Serial.println("❌ Command transmission failed");
+    }
+}
         Serial.println("✅ Command sent via LoRa");
     } else {
         Serial.println("❌ Failed to send command");
