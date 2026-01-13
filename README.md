@@ -4,9 +4,9 @@ LoRa-to-MQTT bridge for environmental sensor network.
 
 ## Hardware
 
-- **ESP32**: ESP32 LX7 Dual-core
-- **LoRa**: SX1262 LoRa module (863-928 MHz)
-- **Display**: 0.96" OLED SSD1306 (I2C)
+- **Board**: Heltec WiFi LoRa 32 V3 (ESP32-S3) with built-in SX1262
+- **LoRa**: SX1262 LoRa module (863-928 MHz) - built-in
+- **Display**: 0.96" OLED SSD1306 (I2C) - built-in
 - **Power**: Mains powered (USB or 5V adapter)
 
 ## Features
@@ -31,9 +31,9 @@ Preserves existing `esp-sensor-hub` topic structure:
 ### Topics
 
 ```
-esp-sensor-hub/0000F09E9E76AEC4/readings   # Sensor data (full 64-bit device ID)
-esp-sensor-hub/0000F09E9E76AEC4/status     # Health metrics and device info
-esp-sensor-hub/0000F09E9E76AEC4/events     # System events (startup, errors)
+esp-sensor-hub/AABBCCDDEEFF0011/readings   # Sensor data (full 64-bit device ID)
+esp-sensor-hub/AABBCCDDEEFF0011/status     # Health metrics and device info
+esp-sensor-hub/AABBCCDDEEFF0011/events     # System events (startup, errors)
 lora/command                                # Commands (publish here)
 lora/command/ack                            # Command acknowledgments
 lora/gateway/status                         # Gateway health
@@ -43,7 +43,7 @@ lora/gateway/status                         # Gateway health
 
 ```json
 {
-  "device_id": "0000F09E9E76AEC4",
+  "device_id": "AABBCCDDEEFF0011",
   "device_name": "BME280-LoRa-001",
   "location": "Office",
   "timestamp": 1234567890,
@@ -66,7 +66,7 @@ lora/gateway/status                         # Gateway health
 
 ```json
 {
-  "device_id": "0000F09E9E76AEC4",
+  "device_id": "AABBCCDDEEFF0011",
   "device_name": "BME280-LoRa-001",
   "location": "Office",
   "uptime": 3600,
@@ -88,7 +88,7 @@ lora/gateway/status                         # Gateway health
 
 ```json
 {
-  "device_id": "0000F09E9E76AEC4",
+  "device_id": "AABBCCDDEEFF0011",
   "device_name": "BME280-LoRa-001",
   "location": "Office",
   "event_type": 1,
@@ -110,15 +110,17 @@ lora/gateway/status                         # Gateway health
 
 See [include/device_config.h](include/device_config.h) for complete pin assignments.
 
-**Critical pins** (verify against your module datasheet):
+**Heltec WiFi LoRa 32 V3 (ESP32-S3):**
 ```
-LoRa SX1262 (SPI):
-  MISO = 19, MOSI = 27, SCK = 5
-  NSS = 18, DIO1 = 26, BUSY = 23, RST = 14
+LoRa SX1262 (SPI - built-in):
+  MISO = 11, MOSI = 10, SCK = 9
+  NSS = 8, DIO1 = 14, BUSY = 13, RST = 12
 
-OLED (I2C):
-  SDA = 21, SCL = 22
+OLED Display (I2C - built-in):
+  SDA = 17, SCL = 18, RST = 21
   OLED addr = 0x3C
+
+Vext Control: GPIO 36 (LOW = peripherals ON)
 ```
 
 ## Quick Start
@@ -170,7 +172,7 @@ Sensors automatically register when they send their first status message. The ga
 
 **Gateway automatically:**
 - Creates registry entry with full 64-bit device ID
-- Updates MQTT topics: `esp-sensor-hub/0000F09E9E76AEC4/*`
+- Updates MQTT topics: `esp-sensor-hub/AABBCCDDEEFF0011/*`
 - Includes friendly name in all JSON messages
 
 **Manual override** (optional):
@@ -181,7 +183,7 @@ Edit `/data/sensor_registry.json` and re-upload filesystem:
 {
   "devices": [
     {
-      "id": "0000F09E9E76AEC4",
+      "id": "AABBCCDDEEFF0011",
       "name": "Kitchen-BME280",
       "location": "Kitchen"
     }
@@ -262,7 +264,7 @@ Commands use JSON format with the following structure:
 
 ```json
 {
-  "device_id": "0000F09E9E76AEC4",   // Full 64-bit device ID (16 hex chars)
+  "device_id": "AABBCCDDEEFF0011",   // Full 64-bit device ID (16 hex chars)
   "action": "set_interval",           // Command type
   "value": 90                         // Optional value (for set_interval, set_sleep, set_baseline)
 }
@@ -274,13 +276,13 @@ Commands use JSON format with the following structure:
 
 | Action | Value | Description | Example |
 |--------|-------|-------------|---------|
-| `set_interval` | Integer (seconds) | Set sensor reading interval (5-3600s) | `{"device_id":"0000F09E9E76AEC4","action":"set_interval","value":90}` |
-| `set_sleep` | Integer (seconds) | Set deep sleep duration (0-3600s) | `{"device_id":"0000F09E9E76AEC4","action":"set_sleep","value":900}` |
-| `calibrate` | None | Set current pressure as baseline | `{"device_id":"0000F09E9E76AEC4","action":"calibrate"}` |
-| `set_baseline` | Float (hPa) | Set specific pressure baseline (900-1100 hPa) | `{"device_id":"0000F09E9E76AEC4","action":"set_baseline","value":1013.25}` |
-| `clear_baseline` | None | Disable pressure baseline tracking | `{"device_id":"0000F09E9E76AEC4","action":"clear_baseline"}` |
-| `status` | None | Request immediate status update | `{"device_id":"0000F09E9E76AEC4","action":"status"}` |
-| `restart` | None | Restart sensor device | `{"device_id":"0000F09E9E76AEC4","action":"restart"}` |
+| `set_interval` | Integer (seconds) | Set sensor reading interval (5-3600s) | `{"device_id":"AABBCCDDEEFF0011","action":"set_interval","value":90}` |
+| `set_sleep` | Integer (seconds) | Set deep sleep duration (0-3600s) | `{"device_id":"AABBCCDDEEFF0011","action":"set_sleep","value":900}` |
+| `calibrate` | None | Set current pressure as baseline | `{"device_id":"AABBCCDDEEFF0011","action":"calibrate"}` |
+| `set_baseline` | Float (hPa) | Set specific pressure baseline (900-1100 hPa) | `{"device_id":"AABBCCDDEEFF0011","action":"set_baseline","value":1013.25}` |
+| `clear_baseline` | None | Disable pressure baseline tracking | `{"device_id":"AABBCCDDEEFF0011","action":"clear_baseline"}` |
+| `status` | None | Request immediate status update | `{"device_id":"AABBCCDDEEFF0011","action":"status"}` |
+| `restart` | None | Restart sensor device | `{"device_id":"AABBCCDDEEFF0011","action":"restart"}` |
 
 ### Using the Command Script (Recommended)
 
@@ -312,7 +314,7 @@ nano .env
 **Advanced Usage:**
 ```bash
 # Target different sensors
-./lora-cmd.sh -d 0000F09E9E76AEC4 interval 60
+./lora-cmd.sh -d AABBCCDDEEFF0011 interval 60
 
 # Override broker from .env
 ./lora-cmd.sh -b 192.168.1.100 interval 120
@@ -335,31 +337,31 @@ nano .env
 ```bash
 # Set reading interval to 90 seconds
 mosquitto_pub -h YOUR_BROKER -t "lora/command" \
-  -m '{"device_id":"0000F09E9E76AEC4","action":"set_interval","value":90}'
+  -m '{"device_id":"AABBCCDDEEFF0011","action":"set_interval","value":90}'
 
 # Set deep sleep to 15 minutes
 mosquitto_pub -h YOUR_BROKER -t "lora/command" \
-  -m '{"device_id":"0000F09E9E76AEC4","action":"set_sleep","value":900}'
+  -m '{"device_id":"AABBCCDDEEFF0011","action":"set_sleep","value":900}'
 
 # Calibrate pressure baseline (current reading)
 mosquitto_pub -h YOUR_BROKER -t "lora/command" \
-  -m '{"device_id":"0000F09E9E76AEC4","action":"calibrate"}'
+  -m '{"device_id":"AABBCCDDEEFF0011","action":"calibrate"}'
 
 # Set specific pressure baseline
 mosquitto_pub -h YOUR_BROKER -t "lora/command" \
-  -m '{"device_id":"0000F09E9E76AEC4","action":"set_baseline","value":1013.25}'
+  -m '{"device_id":"AABBCCDDEEFF0011","action":"set_baseline","value":1013.25}'
 
 # Clear pressure baseline
 mosquitto_pub -h YOUR_BROKER -t "lora/command" \
-  -m '{"device_id":"0000F09E9E76AEC4","action":"clear_baseline"}'
+  -m '{"device_id":"AABBCCDDEEFF0011","action":"clear_baseline"}'
 
 # Request status update
 mosquitto_pub -h YOUR_BROKER -t "lora/command" \
-  -m '{"device_id":"0000F09E9E76AEC4","action":"status"}'
+  -m '{"device_id":"AABBCCDDEEFF0011","action":"status"}'
 
 # Restart sensor
 mosquitto_pub -h YOUR_BROKER -t "lora/command" \
-  -m '{"device_id":"0000F09E9E76AEC4","action":"restart"}'
+  -m '{"device_id":"AABBCCDDEEFF0011","action":"restart"}'
 ```
 
 ### Command Acknowledgments
@@ -368,7 +370,7 @@ When the gateway receives and processes a command, it publishes an acknowledgmen
 
 ```json
 {
-  "device_id": "0000F09E9E76AEC4",
+  "device_id": "AABBCCDDEEFF0011",
   "action": "set_interval",
   "status": "queued"
 }
@@ -387,7 +389,7 @@ Located at `/data/sensor_registry.json`:
 {
   "devices": [
     {
-      "id": "0000F09E9E76AEC4",
+      "id": "AABBCCDDEEFF0011",
       "name": "BME280-LoRa-001",
       "location": "Office"
     }

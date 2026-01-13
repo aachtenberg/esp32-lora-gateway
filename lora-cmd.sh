@@ -19,7 +19,7 @@ MQTT_PASS="${MQTT_PASS:-}"
 MQTT_TOPIC="lora/command"
 
 # Default device ID (full 16-character hex)
-DEFAULT_DEVICE_ID="${DEFAULT_DEVICE_ID:-0000F09E9E76AEC4}"
+DEFAULT_DEVICE_ID="${DEFAULT_DEVICE_ID:-AABBCCDDEEFF0011}"
 
 # Colors for output
 GREEN='\033[0;32m'
