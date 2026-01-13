@@ -4,6 +4,7 @@
 #include <Wire.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/portmacro.h>
+#include <freertos/semphr.h>
 
 // OLED display instance (128x64 SSD1306)
 static U8G2_SSD1306_128X64_NONAME_F_HW_I2C* display = nullptr;
@@ -14,8 +15,15 @@ static uint32_t packetsReceived = 0;
 static int16_t lastRssi = 0;
 static String lastDevice = "";
 
+// Last sensor readings for display
+static float lastTemp = 0.0;
+static float lastHumidity = 0.0;
+static float lastPressure = 0.0;
+static int8_t lastPressureTrend = 1;  // 0=falling, 1=steady, 2=rising
+static float lastPressureChange = 0.0;
+
 // Mutex for display rendering (to prevent corruption from concurrent access)
-static portMUX_TYPE displayMux = portMUX_INITIALIZER_UNLOCKED;
+static SemaphoreHandle_t displayMutex = nullptr;
 
 // LoRa debug state (updated from LoRa RX task; rendered from main loop)
 static portMUX_TYPE loraDbgMux = portMUX_INITIALIZER_UNLOCKED;
@@ -153,6 +161,15 @@ bool initDisplay() {
     display->begin();
     display->setContrast(255);
     
+    // Create display mutex
+    if (displayMutex == nullptr) {
+        displayMutex = xSemaphoreCreateMutex();
+        if (displayMutex == nullptr) {
+            Serial.println("Failed to create display mutex!");
+            return false;
+        }
+    }
+    
     display->clearBuffer();
     display->setFont(u8g2_font_ncenB08_tr);
 
@@ -211,69 +228,75 @@ void displayWiFi(const char* ssid, const char* ip) {
 void displayStatus(uint32_t packets, int deviceCount) {
     if (display == nullptr) return;
 
-    // Snapshot LoRa debug values (avoid holding lock while drawing)
-    uint32_t ok, dropped, dup, lastMs;
-    uint16_t devShort, seq;
-    uint8_t type, payloadLen;
-    int16_t rssi, err;
+    // Snapshot LoRa debug values
+    uint32_t ok, dropped, dup;
+    uint16_t devShort;
+    int16_t rssi;
     int8_t snr;
-    uint8_t hdr[4];
     portENTER_CRITICAL(&loraDbgMux);
     ok = loraOk;
     dropped = loraDropped;
     dup = loraDup;
     devShort = loraLastDevShort;
-    seq = loraLastSeq;
-    type = loraLastType;
-    payloadLen = loraLastPayloadLen;
     rssi = loraLastRssi;
     snr = loraLastSnr;
-    err = loraLastErr;
-    lastMs = loraLastPacketMs;
-    memcpy(hdr, loraLastHdr, 4);
     portEXIT_CRITICAL(&loraDbgMux);
-    
+
     // Lock display for rendering
-    portENTER_CRITICAL(&displayMux);
-    
-    display->clearBuffer();
-    
-    // Title
-    display->setFont(u8g2_font_ncenB08_tr);
-    display->drawStr(0, 10, "LoRa Gateway");
-    
-    // Packet count + devices
-    display->setFont(u8g2_font_6x10_tr);
-    char buffer[32];
-    snprintf(buffer, sizeof(buffer), "OK:%lu Dev:%d", ok ? ok : packets, deviceCount);
-    display->drawStr(0, 25, buffer);
+    if (displayMutex && xSemaphoreTake(displayMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        display->clearBuffer();
+        char buffer[32];
 
-    // RX statistics line
-    snprintf(buffer, sizeof(buffer), "Drop:%lu Dup:%lu", dropped, dup);
-    display->drawStr(0, 38, buffer);
+        // Title
+        display->setFont(u8g2_font_ncenB08_tr);
+        display->drawStr(0, 10, "LoRa Gateway");
 
-    // Last packet line
-    if (lastMs != 0) {
-        snprintf(buffer, sizeof(buffer), "ID:%04X S:%u T:%02X L:%u", devShort, (unsigned)seq, type, payloadLen);
-        display->drawStr(0, 51, buffer);
+        // Temperature and humidity (if we have data)
+        if (lastTemp != 0.0 || lastHumidity != 0.0) {
+            display->setFont(u8g2_font_6x10_tr);
+            snprintf(buffer, sizeof(buffer), "%.1fC  H:%.0f%%", lastTemp, lastHumidity);
+            display->drawStr(0, 24, buffer);
 
-        // Header + RSSI/SNR
-        char buffer2[32];
-        snprintf(buffer2, sizeof(buffer2), "%02X%02X %02X%02X R:%d S:%d", hdr[0], hdr[1], hdr[2], hdr[3], rssi, (int)snr);
-        display->setFont(u8g2_font_5x7_tr);
-        display->drawStr(0, 63, buffer2);
-    } else {
-        // No packet yet: show RX state / last error
-        if (err != 0) {
-            snprintf(buffer, sizeof(buffer), "RX err: %d", err);
+            // Pressure with trend
+            const char* trendSymbol = "-";  // Steady
+            if (lastPressureTrend == 2) trendSymbol = "^";      // Rising
+            else if (lastPressureTrend == 0) trendSymbol = "v"; // Falling
+
+            if (lastPressure > 0) {
+                snprintf(buffer, sizeof(buffer), "P:%.0f%s", lastPressure, trendSymbol);
+                display->drawStr(0, 37, buffer);
+
+                // Pressure change (if baseline set)
+                if (lastPressureChange != 0.0) {
+                    display->setFont(u8g2_font_5x7_tf);
+                    snprintf(buffer, sizeof(buffer), "%+.1f", lastPressureChange);
+                    display->drawStr(70, 37, buffer);
+                    display->setFont(u8g2_font_6x10_tr);
+                }
+            }
         } else {
-            snprintf(buffer, sizeof(buffer), "RX: waiting...");
+            // No sensor data yet
+            display->setFont(u8g2_font_6x10_tr);
+            display->drawStr(0, 24, "Waiting for");
+            display->drawStr(0, 37, "sensor data...");
         }
-        display->drawStr(0, 51, buffer);
+
+        // Device count and packet stats
+        display->setFont(u8g2_font_5x7_tf);
+        snprintf(buffer, sizeof(buffer), "Dev:%d RX:%lu D:%lu", deviceCount, ok ? ok : packets, dropped);
+        display->drawStr(0, 50, buffer);
+
+        // Last device ID and RSSI
+        if (devShort != 0) {
+            snprintf(buffer, sizeof(buffer), "ID:%04X RSSI:%ddBm", devShort, rssi);
+            display->drawStr(0, 62, buffer);
+        } else {
+            display->drawStr(0, 62, "No packets yet");
+        }
+
+        display->sendBuffer();
+        xSemaphoreGive(displayMutex);
     }
-    
-    display->sendBuffer();
-    portEXIT_CRITICAL(&displayMux);
 }
 
 /**
@@ -281,35 +304,51 @@ void displayStatus(uint32_t packets, int deviceCount) {
  */
 void displayPacketReceived(uint64_t deviceId, float temp, float humidity, int16_t rssi, int8_t snr) {
     if (display == nullptr) return;
-    
+
     packetsReceived++;
     lastRssi = rssi;
-    
-    portENTER_CRITICAL(&displayMux);
-    display->clearBuffer();
-    display->setFont(u8g2_font_ncenB08_tr);
-    display->drawStr(0, 10, "Packet RX");
-    
-    // Device ID (last 4 hex digits)
-    char buffer[32];
-    snprintf(buffer, sizeof(buffer), "ID: %04X", (uint16_t)(deviceId & 0xFFFF));
-    display->drawStr(0, 22, buffer);
-    
-    // Temperature and Humidity
-    display->setFont(u8g2_font_6x10_tr);
-    snprintf(buffer, sizeof(buffer), "T:%.1fC H:%.0f%%", temp, humidity);
-    display->drawStr(0, 34, buffer);
-    
-    // RSSI and SNR
-    snprintf(buffer, sizeof(buffer), "RSSI:%d SNR:%d", rssi, snr);
-    display->drawStr(0, 46, buffer);
-    
-    // Packet count
-    snprintf(buffer, sizeof(buffer), "Total: %lu", packetsReceived);
-    display->drawStr(0, 58, buffer);
-    
-    display->sendBuffer();
-    portEXIT_CRITICAL(&displayMux);
+
+    // Store readings for main display
+    lastTemp = temp;
+    lastHumidity = humidity;
+
+    if (displayMutex && xSemaphoreTake(displayMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        display->clearBuffer();
+        display->setFont(u8g2_font_ncenB08_tr);
+        display->drawStr(0, 10, "Packet RX");
+
+        // Device ID (last 4 hex digits)
+        char buffer[32];
+        snprintf(buffer, sizeof(buffer), "ID: %04X", (uint16_t)(deviceId & 0xFFFF));
+        display->drawStr(0, 22, buffer);
+
+        // Temperature and Humidity
+        display->setFont(u8g2_font_6x10_tr);
+        snprintf(buffer, sizeof(buffer), "T:%.1fC H:%.0f%%", temp, humidity);
+        display->drawStr(0, 34, buffer);
+
+        // RSSI and SNR
+        snprintf(buffer, sizeof(buffer), "RSSI:%d SNR:%d", rssi, snr);
+        display->drawStr(0, 46, buffer);
+
+        // Packet count
+        snprintf(buffer, sizeof(buffer), "Total: %lu", packetsReceived);
+        display->drawStr(0, 58, buffer);
+
+        display->sendBuffer();
+        xSemaphoreGive(displayMutex);
+    }
+}
+
+/**
+ * Update stored sensor readings for display
+ */
+void displayUpdateSensorData(float temp, float humidity, float pressure, int8_t pressureTrend, float pressureChange) {
+    lastTemp = temp;
+    lastHumidity = humidity;
+    lastPressure = pressure;
+    lastPressureTrend = pressureTrend;
+    lastPressureChange = pressureChange;
 }
 
 /**
@@ -327,17 +366,18 @@ void displayPacket(const char* deviceName, int16_t rssi, int8_t snr) {
 void displayError(const char* error) {
     if (display == nullptr) return;
     
-    portENTER_CRITICAL(&displayMux);
-    display->clearBuffer();
-    
-    display->setFont(u8g2_font_ncenB10_tr);
-    display->drawStr(30, 20, "ERROR");
-    
-    display->setFont(u8g2_font_6x10_tr);
-    display->drawStr(5, 40, error);
-    
-    display->sendBuffer();
-    portEXIT_CRITICAL(&displayMux);
+    if (displayMutex && xSemaphoreTake(displayMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        display->clearBuffer();
+        
+        display->setFont(u8g2_font_ncenB10_tr);
+        display->drawStr(30, 20, "ERROR");
+        
+        display->setFont(u8g2_font_6x10_tr);
+        display->drawStr(5, 40, error);
+        
+        display->sendBuffer();
+        xSemaphoreGive(displayMutex);
+    }
 }
 
 /**

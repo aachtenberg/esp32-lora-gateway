@@ -10,6 +10,9 @@
 // SX1262 module instance
 static SX1262* radio = nullptr;
 
+// Radio mutex for thread-safe access
+static SemaphoreHandle_t radioMutex = nullptr;
+
 // Packet queue for communication between LoRa RX and MQTT tasks
 static QueueHandle_t rxPacketQueue = nullptr;
 
@@ -101,6 +104,13 @@ bool initLoRaReceiver() {
     // However, if we don't set it, RadioLib might not configure the radio to fire the signal on the pin.
     // But startReceive() configures the radio to listen.
     
+    // Create radio mutex
+    radioMutex = xSemaphoreCreateMutex();
+    if (radioMutex == NULL) {
+        Serial.println("❌ Failed to create radio mutex!");
+        return false;
+    }
+    
     // Create packet queue
     rxPacketQueue = xQueueCreate(20, sizeof(ReceivedPacket));
     if (rxPacketQueue == NULL) {
@@ -146,10 +156,12 @@ void loraRxTask(void* parameter) {
         // We must detect when it's done.
         
         if (irqTriggered) {
-             // Interrupt detected! A packet might be ready.
-             // readData() reads the packet and clears the IRQ flags.
-             memset(rxBuffer, 0, sizeof(rxBuffer));
-             int state = radio->readData(rxBuffer, sizeof(rxBuffer));
+             // Acquire mutex before accessing radio
+             if (xSemaphoreTake(radioMutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+                 // Interrupt detected! A packet might be ready.
+                 // readData() reads the packet and clears the IRQ flags.
+                 memset(rxBuffer, 0, sizeof(rxBuffer));
+                 int state = radio->readData(rxBuffer, sizeof(rxBuffer));
              
              if (state == RADIOLIB_ERR_NONE) {
                 // Packet received successfully
@@ -170,6 +182,8 @@ void loraRxTask(void* parameter) {
             if (packetLen < sizeof(LoRaPacketHeader)) {
                 Serial.printf("⚠️  Packet too short (%zu bytes)\n", packetLen);
                 packetsDropped++;
+                radio->startReceive();
+                xSemaphoreGive(radioMutex);
                 continue;
             }
             
@@ -198,14 +212,18 @@ void loraRxTask(void* parameter) {
                              header->checksum, calculateHeaderChecksum(header));
                 packetsDropped++;
                 displayUpdateLoRaStats(packetsReceived, packetsDropped, duplicatesFiltered);
+                radio->startReceive();
+                xSemaphoreGive(radioMutex);
                 continue;
             }
-            
+
             // Check for duplicate
             if (isDuplicate(header->deviceId, header->sequenceNum)) {
                 Serial.printf("⚠️  Duplicate packet (Seq: %d)\n", header->sequenceNum);
                 duplicatesFiltered++;
                 displayUpdateLoRaStats(packetsReceived, packetsDropped, duplicatesFiltered);
+                radio->startReceive();
+                xSemaphoreGive(radioMutex);
                 continue;
             }
             
@@ -258,14 +276,23 @@ void loraRxTask(void* parameter) {
             // Resume RX after reading a packet matches
             // RadioLib readData() puts radio in standby. We must restart RX.
             radio->startReceive();
+            
+            // Release mutex
+            xSemaphoreGive(radioMutex);
              } 
              else if (state == RADIOLIB_ERR_CRC_MISMATCH) {
                  Serial.println("Rx CRC error");
                  radio->startReceive();
+                 xSemaphoreGive(radioMutex);
              }
              else {
                  Serial.printf("Rx Error or false alarm: %d\n", state);
                  radio->startReceive();
+                 xSemaphoreGive(radioMutex);
+             }
+             } else {
+                 // Couldn't acquire mutex, skip this cycle
+                 vTaskDelay(pdMS_TO_TICKS(5));
              }
         } else {
             // Yield to avoid starving other tasks / triggering watchdog
@@ -310,20 +337,16 @@ bool sendAck(uint64_t deviceId, uint16_t seqNum, bool success, int8_t rssi, int8
     memcpy(txBuffer, &header, sizeof(LoRaPacketHeader));
     memcpy(txBuffer + sizeof(LoRaPacketHeader), &ack, sizeof(AckPayload));
     
-    // Transmit ACK (briefly stop RX mode)
+    // Transmit ACK (caller must handle RX restart and holds mutex)
     Serial.printf("[LoRa TX] Sending ACK for seq %d... ", seqNum);
-    
+
     int state = radio->transmit(txBuffer, sizeof(txBuffer));
-    
+
     if (state == RADIOLIB_ERR_NONE) {
         Serial.println("✅");
-        // Restart receiving
-        radio->startReceive();
         return true;
     } else {
         Serial.printf("❌ (code: %d)\n", state);
-        // Restart receiving even on failure
-        radio->startReceive();
         return false;
     }
 }
@@ -368,6 +391,10 @@ bool sendCommand(uint64_t deviceId, const CommandPayload* cmd) {
  */
 QueueHandle_t getPacketQueue() {
     return rxPacketQueue;
+}
+
+SemaphoreHandle_t getRadioMutex() {
+    return radioMutex;
 }
 
 /**

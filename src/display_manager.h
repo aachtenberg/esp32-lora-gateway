@@ -21,6 +21,9 @@ void displayStatus(uint32_t packets, int deviceCount);
 // Display packet received (updates display with latest packet info)
 void displayPacketReceived(uint64_t deviceId, float temp, float humidity, int16_t rssi, int8_t snr);
 
+// Update sensor readings for main display
+void displayUpdateSensorData(float temp, float humidity, float pressure, int8_t pressureTrend, float pressureChange);
+
 // Display error message
 void displayError(const char* error);
 

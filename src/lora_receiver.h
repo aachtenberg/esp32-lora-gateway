@@ -37,4 +37,7 @@ bool isRadioInitialized();
 // Get packet queue handle (for MQTT task)
 QueueHandle_t getPacketQueue();
 
+// Get radio mutex for thread-safe access
+SemaphoreHandle_t getRadioMutex();
+
 #endif // LORA_RECEIVER_H

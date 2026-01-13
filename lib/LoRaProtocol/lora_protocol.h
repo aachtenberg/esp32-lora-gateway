@@ -62,7 +62,7 @@ struct ReadingsPayload {
     uint8_t  pressureTrend;   // 0=falling, 1=steady, 2=rising
 } __attribute__((packed));
 
-// Status payload (24 bytes) - Device health metrics
+// Status payload (88 bytes) - Device health metrics
 struct StatusPayload {
     uint32_t uptime;          // Uptime in seconds
     uint16_t wakeCount;       // Deep sleep wake counter
@@ -74,6 +74,8 @@ struct StatusPayload {
     uint16_t txFailures;      // LoRa TX failure counter
     uint32_t lastSuccessTx;   // Timestamp of last successful TX
     uint16_t deepSleepSec;    // Current deep sleep interval
+    char     deviceName[32];  // Device name (null-terminated)
+    char     location[32];    // Location (manual or GPS, null-terminated)
 } __attribute__((packed));
 
 // Command types (matching current MQTT commands)
@@ -87,6 +89,26 @@ enum CommandType {
     CMD_SET_INTERVAL    = 0x07,  // Set sensor read interval
     CMD_OTA_START       = 0x08,  // Start OTA update (future)
     CMD_TIME_SYNC       = 0x09,  // Time synchronization
+};
+
+// Event types
+enum EventType {
+    EVENT_STARTUP       = 0x01,  // Device startup
+    EVENT_SHUTDOWN      = 0x02,  // Device shutdown
+    EVENT_SENSOR_ERROR  = 0x10,  // Sensor read error
+    EVENT_LORA_ERROR    = 0x11,  // LoRa communication error
+    EVENT_CONFIG_CHANGE = 0x20,  // Configuration changed
+    EVENT_OTA_START     = 0x30,  // OTA update started
+    EVENT_OTA_COMPLETE  = 0x31,  // OTA update completed
+    EVENT_OTA_FAILED    = 0x32,  // OTA update failed
+};
+
+// Event severity levels
+enum EventSeverity {
+    SEVERITY_INFO       = 0,
+    SEVERITY_WARNING    = 1,
+    SEVERITY_ERROR      = 2,
+    SEVERITY_CRITICAL   = 3
 };
 
 // Command payload (variable length, max 240 bytes)

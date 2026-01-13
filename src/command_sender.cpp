@@ -1,17 +1,146 @@
 /**
  * Command Sender - LoRa Gateway
- * Sends remote configuration commands to sensors
+ * Sends remote configuration commands to sensors with retry mechanism
  */
 
 #include "command_sender.h"
 #include "lora_config.h"
 #include "lora_protocol.h"
+#include "device_config.h"
 #include <RadioLib.h>
 
 // Forward declarations - radio initialized in lora_receiver.cpp
 extern SX1262* getRadio();
 extern uint64_t getGatewayId();
 extern bool isRadioInitialized();
+extern SemaphoreHandle_t getRadioMutex();
+
+// ====================================================================
+// Command Queue for Persistent Retry
+// ====================================================================
+
+struct QueuedCommand {
+    uint64_t sensorId;
+    uint8_t cmdType;
+    uint8_t params[238];
+    uint8_t paramLen;
+    uint32_t queuedAt;
+    uint8_t retryCount;
+};
+
+static QueuedCommand commandQueue[MAX_QUEUED_COMMANDS];
+static uint8_t queueSize = 0;
+
+/**
+ * Initialize command sender
+ */
+void initCommandSender() {
+    queueSize = 0;
+    Serial.println("[CMD] Command sender initialized with retry mechanism");
+}
+
+/**
+ * Add command to persistent queue
+ */
+bool queueCommand(uint64_t sensorId, uint8_t cmdType, const uint8_t* params, uint8_t paramLen) {
+    if (queueSize >= MAX_QUEUED_COMMANDS) {
+        Serial.println("❌ [CMD] Command queue full!");
+        return false;
+    }
+    
+    // Check if same command already queued for this sensor
+    for (int i = 0; i < queueSize; i++) {
+        if (commandQueue[i].sensorId == sensorId && commandQueue[i].cmdType == cmdType) {
+            Serial.println("⚠️  [CMD] Command already queued, updating timestamp");
+            commandQueue[i].queuedAt = millis();
+            commandQueue[i].retryCount = 0;
+            if (paramLen > 0 && params) {
+                memcpy(commandQueue[i].params, params, paramLen);
+                commandQueue[i].paramLen = paramLen;
+            }
+            return true;
+        }
+    }
+    
+    // Add new command to queue
+    QueuedCommand* cmd = &commandQueue[queueSize];
+    cmd->sensorId = sensorId;
+    cmd->cmdType = cmdType;
+    cmd->paramLen = paramLen;
+    if (paramLen > 0 && params) {
+        memcpy(cmd->params, params, paramLen);
+    }
+    cmd->queuedAt = millis();
+    cmd->retryCount = 0;
+    queueSize++;
+    
+    Serial.printf("✅ [CMD] Queued command 0x%02X for sensor 0x%016llX (%d in queue)\n", 
+                  cmdType, sensorId, queueSize);
+    
+    // Try sending immediately
+    sendCommand(sensorId, cmdType, params, paramLen);
+    
+    return true;
+}
+
+/**
+ * Remove expired commands from queue
+ */
+static void cleanExpiredCommands() {
+    uint32_t now = millis();
+    
+    for (int i = queueSize - 1; i >= 0; i--) {
+        if (now - commandQueue[i].queuedAt > COMMAND_EXPIRATION_MS) {
+            Serial.printf("⏰ [CMD] Command 0x%02X expired for sensor 0x%016llX\n", 
+                          commandQueue[i].cmdType, commandQueue[i].sensorId);
+            
+            // Remove from queue by shifting remaining items
+            for (int j = i; j < queueSize - 1; j++) {
+                commandQueue[j] = commandQueue[j + 1];
+            }
+            queueSize--;
+        }
+    }
+}
+
+/**
+ * Retry queued commands for a specific sensor
+ * Call this when sensor transmits (opens its RX window)
+ */
+void retryCommandsForSensor(uint64_t sensorId) {
+    cleanExpiredCommands();
+    
+    bool foundCommands = false;
+    for (int i = 0; i < queueSize; i++) {
+        if (commandQueue[i].sensorId == sensorId) {
+            foundCommands = true;
+            commandQueue[i].retryCount++;
+            
+            Serial.printf("🔄 [CMD] Retrying command 0x%02X for sensor 0x%016llX (attempt %d)\n", 
+                          commandQueue[i].cmdType, sensorId, commandQueue[i].retryCount);
+            
+            bool success = sendCommand(sensorId, commandQueue[i].cmdType, 
+                                      commandQueue[i].params, commandQueue[i].paramLen);
+            
+            if (success) {
+                // Remove from queue on successful transmission
+                Serial.printf("✅ [CMD] Command sent, removing from queue\n");
+                for (int j = i; j < queueSize - 1; j++) {
+                    commandQueue[j] = commandQueue[j + 1];
+                }
+                queueSize--;
+                i--;  // Adjust index after removal
+            }
+            
+            // Small delay between retries
+            delay(50);
+        }
+    }
+    
+    if (foundCommands && queueSize > 0) {
+        Serial.printf("📋 [CMD] %d commands remaining in queue\n", queueSize);
+    }
+}
 
 /**
  * Helper: Create LoRa packet header
@@ -50,9 +179,15 @@ bool sendCommand(uint64_t sensorId, uint8_t cmdType, const uint8_t* params, uint
     
     SX1262* radio = getRadio();
     uint64_t gatewayId = getGatewayId();
+    SemaphoreHandle_t radioMutex = getRadioMutex();
     
     if (!radio) {
         Serial.println("❌ [COMMAND] Radio pointer is null!");
+        return false;
+    }
+    
+    if (!radioMutex) {
+        Serial.println("❌ [COMMAND] Radio mutex not available!");
         return false;
     }
     
@@ -63,35 +198,81 @@ bool sendCommand(uint64_t sensorId, uint8_t cmdType, const uint8_t* params, uint
     if (paramLen > 0 && params) {
         memcpy(cmd.params, params, paramLen);
     }
-    
-    // Build complete packet
-    uint8_t packet[sizeof(LoRaPacketHeader) + sizeof(CommandPayload)];
+
+    // Calculate actual payload size (cmdType + paramLen + actual params, not full buffer)
+    uint8_t actualPayloadLen = 2 + paramLen;  // 2 = cmdType + paramLen fields
+
+    // Build complete packet (header + actual payload, not full CommandPayload struct)
+    uint8_t packet[sizeof(LoRaPacketHeader) + actualPayloadLen];
     LoRaPacketHeader* header = (LoRaPacketHeader*)packet;
-    
+
     static uint16_t commandSeqNum = 0;
-    initCommandHeader(header, sensorId, commandSeqNum++, sizeof(CommandPayload));
-    
-    memcpy(packet + sizeof(LoRaPacketHeader), &cmd, sizeof(CommandPayload));
+    initCommandHeader(header, sensorId, commandSeqNum++, actualPayloadLen);
+
+    // Copy only the actual command data (not the full CommandPayload buffer)
+    packet[sizeof(LoRaPacketHeader)] = cmd.cmdType;
+    packet[sizeof(LoRaPacketHeader) + 1] = cmd.paramLen;
+    if (paramLen > 0) {
+        memcpy(packet + sizeof(LoRaPacketHeader) + 2, cmd.params, paramLen);
+    }
     
     // Display command info
     Serial.printf("\n[COMMAND TX] Sending to sensor: 0x%016llX\n", sensorId);
     Serial.printf("  Type: 0x%02X, Params: %d bytes, Seq: %d\n", 
                   cmdType, paramLen, commandSeqNum - 1);
     
-    // Ensure radio is in standby before transmit
-    radio->standby();
-    delay(10);
-    
+    // Acquire radio mutex (wait up to 5 seconds to allow RX task to finish)
+    Serial.print("  Acquiring radio mutex... ");
+    if (xSemaphoreTake(radioMutex, pdMS_TO_TICKS(5000)) != pdTRUE) {
+        Serial.println("❌ Failed (timeout)!");
+        return false;
+    }
+    Serial.println("✅");
+
+    // Stop RX mode - must explicitly call standby when in continuous RX
+    Serial.print("  Stopping RX mode... ");
+    int state = radio->standby();
+    if (state != RADIOLIB_ERR_NONE) {
+        Serial.printf("❌ Failed! (code: %d)\n", state);
+        xSemaphoreGive(radioMutex);
+        return false;
+    }
+    Serial.println("✅");
+
+    // Wait for radio to be ready (BUSY pin should be LOW)
+    uint32_t timeout = millis() + 1000;
+    while (digitalRead(LORA_BUSY) == HIGH && millis() < timeout) {
+        delay(1);
+    }
+
+    if (digitalRead(LORA_BUSY) == HIGH) {
+        Serial.println("❌ Radio still BUSY after timeout!");
+        radio->startReceive();
+        xSemaphoreGive(radioMutex);
+        return false;
+    }
+
     // Transmit command packet
     Serial.print("  Transmitting... ");
-    int state = radio->transmit((uint8_t*)packet, sizeof(packet));
+    state = radio->transmit((uint8_t*)packet, sizeof(packet));
     
     if (state == RADIOLIB_ERR_NONE) {
         Serial.println("✅ Success!");
-        Serial.printf("  RSSI: %d dBm, SNR: %d dB\n", radio->getRSSI(), radio->getSNR());
+        // Small delay before restarting RX
+        delay(10);
+        // Restart RX mode
+        radio->startReceive();
+        // Release mutex
+        xSemaphoreGive(radioMutex);
         return true;
     } else {
         Serial.printf("❌ Failed! (code: %d)\n", state);
+        // Small delay before restarting RX
+        delay(10);
+        // Restart RX mode even on failure
+        radio->startReceive();
+        // Release mutex
+        xSemaphoreGive(radioMutex);
         return false;
     }
 }
@@ -148,4 +329,39 @@ bool sendRestartCommand(uint64_t sensorId) {
 bool sendStatusCommand(uint64_t sensorId) {
     Serial.println("\n📡 Sending STATUS command");
     return sendCommand(sensorId, CMD_STATUS, nullptr, 0);
+}
+
+/**
+ * Send CMD_CALIBRATE command to sensor (set current pressure as baseline)
+ */
+bool sendCalibrateCommand(uint64_t sensorId) {
+    Serial.println("\n📡 Sending CALIBRATE command (set current pressure as baseline)");
+    return sendCommand(sensorId, CMD_CALIBRATE, nullptr, 0);
+}
+
+/**
+ * Send CMD_SET_BASELINE command to sensor
+ */
+bool sendSetBaselineCommand(uint64_t sensorId, float baselineHpa) {
+    if (baselineHpa < 900.0 || baselineHpa > 1100.0) {
+        Serial.printf("❌ Invalid baseline: %.2f (valid range: 900-1100 hPa)\n", baselineHpa);
+        return false;
+    }
+
+    Serial.printf("\n📡 Sending SET_BASELINE command: %.2f hPa\n", baselineHpa);
+
+    // Pack baseline as ASCII decimal string
+    char paramStr[16];
+    snprintf(paramStr, sizeof(paramStr), "%.2f", baselineHpa);
+    uint8_t paramLen = strlen(paramStr);
+
+    return sendCommand(sensorId, CMD_SET_BASELINE, (uint8_t*)paramStr, paramLen);
+}
+
+/**
+ * Send CMD_CLEAR_BASELINE command to sensor
+ */
+bool sendClearBaselineCommand(uint64_t sensorId) {
+    Serial.println("\n📡 Sending CLEAR_BASELINE command");
+    return sendCommand(sensorId, CMD_CLEAR_BASELINE, nullptr, 0);
 }

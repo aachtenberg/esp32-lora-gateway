@@ -1,3 +1,9 @@
 {
-  "devices": []
+  "devices": [
+    {
+      "id": "0000F09E9E76AEC4",
+      "name": "BME280-LoRa-001",
+      "location": "Office"
+    }
+  ]
 }

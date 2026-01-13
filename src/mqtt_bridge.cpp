@@ -17,7 +17,7 @@ static WiFiClient wifiClient;
 static PubSubClient mqttClient(wifiClient);
 
 // MQTT topics
-#define MQTT_TOPIC_PREFIX "homeassistant/sensor/"
+#define MQTT_TOPIC_PREFIX "esp-sensor-hub/"
 #define MQTT_COMMAND_TOPIC "lora/command"
 #define MQTT_STATUS_TOPIC "lora/gateway/status"
 
@@ -26,6 +26,15 @@ static uint32_t lastMqttReconnectAttempt = 0;
 
 // External function to get packet queue from lora_receiver
 extern QueueHandle_t getPacketQueue();
+
+/**
+ * Format 64-bit device ID as hex string
+ */
+static String formatDeviceId(uint64_t deviceId) {
+    char buffer[17];
+    snprintf(buffer, sizeof(buffer), "%016llX", deviceId);
+    return String(buffer);
+}
 
 /**
  * Initialize MQTT bridge
@@ -88,6 +97,9 @@ void mqttTask(void* parameter) {
         if (xQueueReceive(packetQueue, &packet, pdMS_TO_TICKS(100)) == pdTRUE) {
             Serial.printf("\n[MQTT] Processing packet from device 0x%016llX\n", packet.header.deviceId);
             
+            // Retry any queued commands for this sensor (it's now in RX window)
+            retryCommandsForSensor(packet.header.deviceId);
+            
             // Route packet based on message type
             switch (packet.header.msgType) {
                 case MSG_READINGS:
@@ -126,13 +138,16 @@ void publishReadings(const ReceivedPacket* packet) {
     // Parse payload
     ReadingsPayload* readings = (ReadingsPayload*)packet->payload;
     
-    // Get device name
+    // Get device name and ID
     String deviceName = getDeviceName(packet->header.deviceId);
+    String deviceLocation = getDeviceLocation(packet->header.deviceId);
+    String deviceId = formatDeviceId(packet->header.deviceId);
     
     // Build JSON
     JsonDocument doc;
-    doc["device_id"] = String((uint32_t)(packet->header.deviceId & 0xFFFFFFFF), HEX);
+    doc["device_id"] = deviceId;
     doc["device_name"] = deviceName;
+    doc["location"] = deviceLocation;
     doc["timestamp"] = readings->timestamp;
     doc["sequence"] = packet->header.sequenceNum;
     
@@ -160,19 +175,19 @@ void publishReadings(const ReceivedPacket* packet) {
     serializeJson(doc, jsonString);
     
     // Publish to MQTT
-    String topic = String(MQTT_TOPIC_PREFIX) + deviceName + "/state";
+    String topic = String(MQTT_TOPIC_PREFIX) + deviceId + "/readings";
     
     if (mqttClient.publish(topic.c_str(), jsonString.c_str(), false)) {
         Serial.printf("✅ Published to %s\n", topic.c_str());
         Serial.println(jsonString);
         
-        // Update display with received packet info
+        // Update display with sensor readings (shown in main status screen)
 #ifdef OLED_ENABLED
-        displayPacketReceived(packet->header.deviceId, 
-                            readings->temperature / 100.0,
-                            readings->humidity / 100.0,
-                            packet->rssi, 
-                            packet->snr);
+        displayUpdateSensorData(readings->temperature / 100.0,
+                               readings->humidity / 100.0,
+                               readings->pressure / 100.0,
+                               readings->pressureTrend,
+                               readings->pressureChange / 100.0);
 #endif
     } else {
         Serial.printf("❌ Failed to publish to %s\n", topic.c_str());
@@ -191,13 +206,34 @@ void publishStatus(const ReceivedPacket* packet) {
     // Parse payload
     StatusPayload* status = (StatusPayload*)packet->payload;
     
-    // Get device name
+    // Extract device name from payload and update registry if present
+    if (status->deviceName[0] != '\0') {
+        String sensorName = String(status->deviceName);
+        sensorName.trim();
+        if (sensorName.length() > 0) {
+            updateDeviceName(packet->header.deviceId, sensorName);
+        }
+    }
+    
+    // Extract location from payload and update registry if present (future: GPS)
+    if (status->location[0] != '\0') {
+        String sensorLocation = String(status->location);
+        sensorLocation.trim();
+        if (sensorLocation.length() > 0) {
+            updateDeviceLocation(packet->header.deviceId, sensorLocation);
+        }
+    }
+    
+    // Get device name and ID (may have just been updated)
     String deviceName = getDeviceName(packet->header.deviceId);
+    String deviceLocation = getDeviceLocation(packet->header.deviceId);
+    String deviceId = formatDeviceId(packet->header.deviceId);
     
     // Build JSON
     JsonDocument doc;
-    doc["device_id"] = String((uint32_t)(packet->header.deviceId & 0xFFFFFFFF), HEX);
+    doc["device_id"] = deviceId;
     doc["device_name"] = deviceName;
+    doc["location"] = deviceLocation;
     doc["uptime"] = status->uptime;
     doc["wake_count"] = status->wakeCount;
     doc["sensor_healthy"] = (bool)status->sensorHealthy;
@@ -218,7 +254,7 @@ void publishStatus(const ReceivedPacket* packet) {
     serializeJson(doc, jsonString);
     
     // Publish
-    String topic = String(MQTT_TOPIC_PREFIX) + deviceName + "/status";
+    String topic = String(MQTT_TOPIC_PREFIX) + deviceId + "/status";
     
     if (mqttClient.publish(topic.c_str(), jsonString.c_str(), false)) {
         Serial.printf("✅ Published status to %s\n", topic.c_str());
@@ -239,8 +275,15 @@ void publishEvent(const ReceivedPacket* packet) {
     // Parse payload
     EventPayload* event = (EventPayload*)packet->payload;
     
-    // Get device name
+    // Clear deduplication buffer on device restart
+    if (event->eventType == 0x01) {  // EVENT_STARTUP
+        clearDuplicationBuffer(packet->header.deviceId);
+    }
+    
+    // Get device name and ID
     String deviceName = getDeviceName(packet->header.deviceId);
+    String deviceLocation = getDeviceLocation(packet->header.deviceId);
+    String deviceId = formatDeviceId(packet->header.deviceId);
     
     // Extract message (null-terminate)
     char message[238];
@@ -250,8 +293,9 @@ void publishEvent(const ReceivedPacket* packet) {
     
     // Build JSON
     JsonDocument doc;
-    doc["device_id"] = String((uint32_t)(packet->header.deviceId & 0xFFFFFFFF), HEX);
+    doc["device_id"] = deviceId;
     doc["device_name"] = deviceName;
+    doc["location"] = deviceLocation;
     doc["event_type"] = event->eventType;
     doc["severity"] = event->severity;  // 0=info, 1=warning, 2=error, 3=critical
     doc["message"] = message;
@@ -262,7 +306,7 @@ void publishEvent(const ReceivedPacket* packet) {
     serializeJson(doc, jsonString);
     
     // Publish
-    String topic = String(MQTT_TOPIC_PREFIX) + deviceName + "/event";
+    String topic = String(MQTT_TOPIC_PREFIX) + deviceId + "/events";
     
     if (mqttClient.publish(topic.c_str(), jsonString.c_str(), false)) {
         Serial.printf("✅ Published event: %s\n", message);
@@ -312,21 +356,46 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     if (strcmp(action, "set_interval") == 0) {
         uint32_t seconds = doc["value"] | 30;  // Default 30 seconds
         Serial.printf("  Setting sensor interval to %lu seconds\n", seconds);
-        success = sendSetIntervalCommand(targetDevice, seconds);
+        
+        // Pack seconds as ASCII decimal string
+        char paramStr[16];
+        snprintf(paramStr, sizeof(paramStr), "%lu", seconds);
+        success = queueCommand(targetDevice, 0x07, (uint8_t*)paramStr, strlen(paramStr));  // CMD_SET_INTERVAL
         
     } else if (strcmp(action, "set_sleep") == 0) {
         uint32_t seconds = doc["value"] | 900;  // Default 15 minutes
         Serial.printf("  Setting deep sleep to %lu seconds\n", seconds);
-        success = sendSetSleepCommand(targetDevice, seconds);
+        
+        // Pack seconds as ASCII decimal string
+        char paramStr[16];
+        snprintf(paramStr, sizeof(paramStr), "%lu", seconds);
+        success = queueCommand(targetDevice, 0x06, (uint8_t*)paramStr, strlen(paramStr));  // CMD_SET_SLEEP
         
     } else if (strcmp(action, "restart") == 0) {
         Serial.println("  Sending restart command");
-        success = sendRestartCommand(targetDevice);
+        success = queueCommand(targetDevice, 0x04, nullptr, 0);  // CMD_RESTART
         
     } else if (strcmp(action, "status") == 0) {
         Serial.println("  Requesting status update");
-        success = sendStatusCommand(targetDevice);
+        success = queueCommand(targetDevice, 0x05, nullptr, 0);  // CMD_STATUS
+
+    } else if (strcmp(action, "calibrate") == 0) {
+        Serial.println("  Calibrating pressure baseline (current reading)");
+        success = queueCommand(targetDevice, 0x01, nullptr, 0);  // CMD_CALIBRATE
+
+    } else if (strcmp(action, "set_baseline") == 0) {
+        float baselineHpa = doc["value"] | 1013.25;  // Default sea level pressure
+        Serial.printf("  Setting pressure baseline to %.2f hPa\n", baselineHpa);
         
+        // Pack baseline as ASCII decimal string
+        char paramStr[16];
+        snprintf(paramStr, sizeof(paramStr), "%.2f", baselineHpa);
+        success = queueCommand(targetDevice, 0x02, (uint8_t*)paramStr, strlen(paramStr));  // CMD_SET_BASELINE
+
+    } else if (strcmp(action, "clear_baseline") == 0) {
+        Serial.println("  Clearing pressure baseline");
+        success = queueCommand(targetDevice, 0x03, nullptr, 0);  // CMD_CLEAR_BASELINE
+
     } else {
         Serial.printf("❌ Unknown action: %s\n", action);
         return;
@@ -334,22 +403,17 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     
     // Publish result
     if (success) {
-        Serial.println("✅ Command sent via LoRa");
+        Serial.println("✅ Command queued for retry on sensor activity");
         // Optionally publish ACK back to MQTT
         char ackTopic[64];
         snprintf(ackTopic, sizeof(ackTopic), "lora/command/ack");
         char ackPayload[128];
         snprintf(ackPayload, sizeof(ackPayload), 
-                 "{\"device_id\":\"%s\",\"action\":\"%s\",\"status\":\"sent\"}", 
+                 "{\"device_id\":\"%s\",\"action\":\"%s\",\"status\":\"queued\"}", 
                  targetDeviceStr, action);
         mqttClient.publish(ackTopic, ackPayload);
     } else {
-        Serial.println("❌ Command transmission failed");
-    }
-}
-        Serial.println("✅ Command sent via LoRa");
-    } else {
-        Serial.println("❌ Failed to send command");
+        Serial.println("❌ Command queueing failed");
     }
 }
 

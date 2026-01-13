@@ -6,7 +6,8 @@
 // Device information
 struct DeviceInfo {
     uint64_t deviceId;        // LoRa device ID (chip ID)
-    String deviceName;        // MQTT-friendly name
+    String deviceName;        // Descriptive device name
+    String location;          // Physical location of device
     uint32_t lastSeen;        // Timestamp of last packet
     int16_t lastRssi;         // Last RSSI value
     int8_t lastSnr;           // Last SNR value
@@ -28,8 +29,20 @@ void updateDeviceInfo(uint64_t deviceId, uint16_t seqNum, int16_t rssi, int8_t s
 // Check if packet is duplicate
 bool isDuplicate(uint64_t deviceId, uint16_t seqNum);
 
+// Clear deduplication buffer for a device (call on device restart)
+void clearDuplicationBuffer(uint64_t deviceId);
+
 // Add new device to registry
-void addDevice(uint64_t deviceId, const String& name);
+void addDevice(uint64_t deviceId, const String& name, const String& location = "Unknown");
+
+// Get device location from LoRa ID
+String getDeviceLocation(uint64_t deviceId);
+
+// Update device name in registry
+void updateDeviceName(uint64_t deviceId, const String& name);
+
+// Update device location in registry
+void updateDeviceLocation(uint64_t deviceId, const String& location);
 
 // Get device info by ID
 DeviceInfo* getDeviceInfo(uint64_t deviceId);

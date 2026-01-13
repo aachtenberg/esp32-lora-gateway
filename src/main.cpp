@@ -10,6 +10,7 @@
 #include "wifi_manager.h"
 #include "device_registry.h"
 #include "display_manager.h"
+#include "command_sender.h"
 #include "command_tester.h"
 
 // FreeRTOS task handles
@@ -67,6 +68,10 @@ void setup() {
     Serial.println("Initializing device registry...");
     initDeviceRegistry();
 
+    // Initialize command sender with retry mechanism
+    Serial.println("Initializing command sender...");
+    initCommandSender();
+
     // Initialize MQTT bridge
     Serial.println("Initializing MQTT bridge...");
     if (!initMqttBridge()) {
@@ -111,9 +116,8 @@ void setup() {
     Serial.println("Gateway startup complete!");
     Serial.println("====================================\n");
 
-#ifdef OLED_ENABLED
-    displayStatus(0, getDeviceCount());
-#endif
+    // Note: Don't call displayStatus() here - let the loop handle display updates
+    // to avoid watchdog timeout during long I2C operations in setup()
 }
 
 void loop() {

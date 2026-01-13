@@ -176,17 +176,123 @@ Sensor receives and executes
 
 ## Supported Commands
 
-Send commands via MQTT to `esp-sensor-hub/{device-name}/command`:
+Send commands via MQTT to topic: `lora/command`
 
-| Command | Payload | Description |
-|---------|---------|-------------|
-| `calibrate` | (none) | Set pressure baseline to current reading |
-| `baseline 1013.25` | Float (hPa) | Set specific pressure baseline |
-| `clear_baseline` | (none) | Disable baseline tracking |
-| `deepsleep 60` | Integer (sec) | Set deep sleep interval (0=disable) |
-| `interval 30` | Integer (sec) | Set sensor read interval |
-| `restart` | (none) | Restart sensor device |
-| `status` | (none) | Request immediate status update |
+Commands use JSON format with the following structure:
+
+```json
+{
+  "device_id": "9e76aec4",   // Last 8 hex digits of sensor device ID
+  "action": "set_interval",   // Command type
+  "value": 90                 // Optional value (for set_interval, set_sleep)
+}
+```
+
+### Available Actions
+
+| Action | Value | Description | Example |
+|--------|-------|-------------|---------|
+| `set_interval` | Integer (seconds) | Set sensor reading interval (5-3600s) | `{"device_id":"9e76aec4","action":"set_interval","value":90}` |
+| `set_sleep` | Integer (seconds) | Set deep sleep duration (0-3600s) | `{"device_id":"9e76aec4","action":"set_sleep","value":900}` |
+| `calibrate` | None | Set current pressure as baseline | `{"device_id":"9e76aec4","action":"calibrate"}` |
+| `set_baseline` | Float (hPa) | Set specific pressure baseline (900-1100 hPa) | `{"device_id":"9e76aec4","action":"set_baseline","value":1013.25}` |
+| `clear_baseline` | None | Disable pressure baseline tracking | `{"device_id":"9e76aec4","action":"clear_baseline"}` |
+| `status` | None | Request immediate status update | `{"device_id":"9e76aec4","action":"status"}` |
+| `restart` | None | Restart sensor device | `{"device_id":"9e76aec4","action":"restart"}` |
+
+### Using the Command Script (Recommended)
+
+The `lora-cmd.sh` script provides a convenient interface for sending commands.
+
+**Quick Setup:**
+```bash
+# 1. Copy the example configuration
+cp .env.example .env
+
+# 2. Edit with your MQTT broker settings
+nano .env
+
+# 3. Run commands
+./lora-cmd.sh interval 90
+```
+
+**Basic Usage:**
+```bash
+./lora-cmd.sh interval 90         # Set interval to 90 seconds
+./lora-cmd.sh sleep 900           # Set sleep to 15 minutes
+./lora-cmd.sh calibrate           # Set current pressure as baseline
+./lora-cmd.sh baseline 1013.25    # Set baseline to 1013.25 hPa
+./lora-cmd.sh clear_baseline      # Clear baseline tracking
+./lora-cmd.sh status              # Request status
+./lora-cmd.sh restart             # Restart sensor
+```
+
+**Advanced Usage:**
+```bash
+# Target different sensors
+./lora-cmd.sh -d aabbccdd interval 60
+
+# Override broker from .env
+./lora-cmd.sh -b 192.168.1.100 interval 120
+
+# With authentication
+./lora-cmd.sh -u user -P password interval 90
+
+# Show help
+./lora-cmd.sh --help
+```
+
+**Configuration Priority:**
+1. Command-line options (highest priority)
+2. Environment variables
+3. `.env` file
+4. Built-in defaults (lowest priority)
+
+### Manual Command Examples (mosquitto_pub)
+
+```bash
+# Set reading interval to 90 seconds
+mosquitto_pub -h YOUR_BROKER -t "lora/command" \
+  -m '{"device_id":"9e76aec4","action":"set_interval","value":90}'
+
+# Set deep sleep to 15 minutes
+mosquitto_pub -h YOUR_BROKER -t "lora/command" \
+  -m '{"device_id":"9e76aec4","action":"set_sleep","value":900}'
+
+# Calibrate pressure baseline (current reading)
+mosquitto_pub -h YOUR_BROKER -t "lora/command" \
+  -m '{"device_id":"9e76aec4","action":"calibrate"}'
+
+# Set specific pressure baseline
+mosquitto_pub -h YOUR_BROKER -t "lora/command" \
+  -m '{"device_id":"9e76aec4","action":"set_baseline","value":1013.25}'
+
+# Clear pressure baseline
+mosquitto_pub -h YOUR_BROKER -t "lora/command" \
+  -m '{"device_id":"9e76aec4","action":"clear_baseline"}'
+
+# Request status update
+mosquitto_pub -h YOUR_BROKER -t "lora/command" \
+  -m '{"device_id":"9e76aec4","action":"status"}'
+
+# Restart sensor
+mosquitto_pub -h YOUR_BROKER -t "lora/command" \
+  -m '{"device_id":"9e76aec4","action":"restart"}'
+```
+
+### Command Acknowledgments
+
+When the gateway receives and processes a command, it publishes an acknowledgment to `lora/command/ack`:
+
+```json
+{
+  "device_id": "9e76aec4",
+  "action": "set_interval",
+  "status": "sent"
+}
+```
+
+**Note:** The ack indicates the LoRa transmission was successful, not that the sensor executed the command.
 
 ## Device Registry
 

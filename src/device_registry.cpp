@@ -48,10 +48,71 @@ String getDeviceName(uint64_t deviceId) {
     // Device not found, generate default name from ID
     String defaultName = "sensor_" + String((uint32_t)(deviceId & 0xFFFFFFFF), HEX);
     
-    // Auto-register new device
-    addDevice(deviceId, defaultName);
+    // Auto-register new device with default location
+    addDevice(deviceId, defaultName, "Unknown");
     
     return defaultName;
+}
+
+/**
+ * Get device location from LoRa ID
+ * Returns device location if found, otherwise "Unknown"
+ */
+String getDeviceLocation(uint64_t deviceId) {
+    // Search for device in registry
+    for (int i = 0; i < deviceCount; i++) {
+        if (devices[i].deviceId == deviceId) {
+            return devices[i].location;
+        }
+    }
+    
+    return "Unknown";
+}
+
+/**
+ * Update device name in registry
+ * Called when sensor reports its local name
+ */
+void updateDeviceName(uint64_t deviceId, const String& name) {
+    // Find device
+    for (int i = 0; i < deviceCount; i++) {
+        if (devices[i].deviceId == deviceId) {
+            // Only update if name is different and not empty
+            if (name.length() > 0 && !devices[i].deviceName.equals(name)) {
+                Serial.printf("📝 Updating device name: '%s' -> '%s'\n", 
+                             devices[i].deviceName.c_str(), name.c_str());
+                devices[i].deviceName = name;
+                saveRegistry();  // Persist changes
+            }
+            return;
+        }
+    }
+    
+    // Device not found - this shouldn't happen since updateDeviceInfo is called first
+    Serial.printf("⚠️  Device 0x%016llX not in registry for name update\n", deviceId);
+}
+
+/**
+ * Update device location in registry
+ * Called when sensor reports its location (manual or GPS)
+ */
+void updateDeviceLocation(uint64_t deviceId, const String& location) {
+    // Find device
+    for (int i = 0; i < deviceCount; i++) {
+        if (devices[i].deviceId == deviceId) {
+            // Only update if location is different and not empty
+            if (location.length() > 0 && !devices[i].location.equals(location)) {
+                Serial.printf("📍 Updating device location: '%s' -> '%s'\n", 
+                             devices[i].location.c_str(), location.c_str());
+                devices[i].location = location;
+                saveRegistry();  // Persist changes
+            }
+            return;
+        }
+    }
+    
+    // Device not found
+    Serial.printf("⚠️  Device 0x%016llX not in registry for location update\n", deviceId);
 }
 
 /**
@@ -70,7 +131,7 @@ void updateDeviceInfo(uint64_t deviceId, uint16_t seqNum, int16_t rssi, int8_t s
     // Device not found, auto-register
     if (device == nullptr) {
         String name = "sensor_" + String((uint32_t)(deviceId & 0xFFFFFFFF), HEX);
-        addDevice(deviceId, name);
+        addDevice(deviceId, name, "Unknown");
         device = &devices[deviceCount - 1];
     }
     
@@ -109,9 +170,28 @@ bool isDuplicate(uint64_t deviceId, uint16_t seqNum) {
 }
 
 /**
+ * Clear deduplication buffer for a device
+ * Call this when a device restarts to reset sequence tracking
+ */
+void clearDuplicationBuffer(uint64_t deviceId) {
+    // Find device
+    for (int i = 0; i < deviceCount; i++) {
+        if (devices[i].deviceId == deviceId) {
+            // Clear the buffer by setting all entries to 0xFFFF (invalid)
+            for (int j = 0; j < DEDUP_BUFFER_SIZE; j++) {
+                devices[i].sequenceBuffer[j] = 0xFFFF;
+            }
+            devices[i].bufferIndex = 0;
+            Serial.printf("🔄 Cleared deduplication buffer for device 0x%016llX\n", deviceId);
+            return;
+        }
+    }
+}
+
+/**
  * Add new device to registry
  */
-void addDevice(uint64_t deviceId, const String& name) {
+void addDevice(uint64_t deviceId, const String& name, const String& location) {
     if (deviceCount >= MAX_SENSORS) {
         Serial.println("⚠️  Registry full, cannot add device!");
         return;
@@ -120,6 +200,7 @@ void addDevice(uint64_t deviceId, const String& name) {
     // Initialize new device
     devices[deviceCount].deviceId = deviceId;
     devices[deviceCount].deviceName = name;
+    devices[deviceCount].location = location;
     devices[deviceCount].lastSeen = millis();
     devices[deviceCount].lastRssi = 0;
     devices[deviceCount].lastSnr = 0;
@@ -176,6 +257,7 @@ bool saveRegistry() {
         
         deviceObj["id"] = idStr;
         deviceObj["name"] = devices[i].deviceName;
+        deviceObj["location"] = devices[i].location;
         deviceObj["lastSeen"] = devices[i].lastSeen;
         deviceObj["packetCount"] = devices[i].packetCount;
     }
@@ -232,9 +314,14 @@ bool loadRegistry() {
         
         // Parse device ID from hex string
         const char* idStr = deviceObj["id"];
+        if (idStr == nullptr) {
+            Serial.println("⚠️  Device ID is null, skipping");
+            continue;
+        }
         devices[deviceCount].deviceId = strtoull(idStr, nullptr, 16);
         
-        devices[deviceCount].deviceName = deviceObj["name"].as<String>();
+        devices[deviceCount].deviceName = deviceObj["name"] | "Unknown";
+        devices[deviceCount].location = deviceObj["location"] | "Unknown";
         devices[deviceCount].lastSeen = deviceObj["lastSeen"] | 0;
         devices[deviceCount].packetCount = deviceObj["packetCount"] | 0;
         devices[deviceCount].lastRssi = 0;
