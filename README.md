@@ -14,9 +14,12 @@ LoRa-to-MQTT bridge for environmental sensor network.
 - **Dual-core architecture**: Core 0 for LoRa RX (low latency), Core 1 for MQTT/WiFi
 - **LoRa peer-to-peer receiver**: Continuous RX mode for sensor packets
 - **MQTT bridge**: Converts binary LoRa packets to JSON MQTT messages
+- **Command retry mechanism**: Persistent queue automatically retries commands until sensor receives them
+- **Device auto-discovery**: Sensors automatically register with name and location
 - **Multi-sensor support**: Track up to 10 sensors simultaneously
-- **Device registry**: Maps LoRa device IDs to MQTT-friendly names
-- **Packet deduplication**: Prevents duplicate messages
+- **Device registry**: Auto-updates device names and locations from sensor status messages
+- **Packet deduplication**: Per-device circular buffer (50 entries) prevents duplicate messages
+- **Thread-safe radio access**: FreeRTOS mutex prevents RX/TX conflicts
 - **WiFiManager**: Web portal for WiFi/MQTT configuration
 - **OTA updates**: Over-the-air firmware updates
 - **OLED status display**: Shows connected sensors, packet counts, WiFi/MQTT status
@@ -28,33 +31,80 @@ Preserves existing `esp-sensor-hub` topic structure:
 ### Topics
 
 ```
-esp-sensor-hub/{device-name}/readings   # Sensor data
-esp-sensor-hub/{device-name}/status     # Health metrics
-esp-sensor-hub/{device-name}/events     # System events
-esp-sensor-hub/{device-name}/command    # Commands (subscribe)
+esp-sensor-hub/0000F09E9E76AEC4/readings   # Sensor data (full 64-bit device ID)
+esp-sensor-hub/0000F09E9E76AEC4/status     # Health metrics and device info
+esp-sensor-hub/0000F09E9E76AEC4/events     # System events (startup, errors)
+lora/command                                # Commands (publish here)
+lora/command/ack                            # Command acknowledgments
+lora/gateway/status                         # Gateway health
 ```
 
 ### Readings JSON
 
 ```json
 {
-  "device": "Kitchen-BME280",
-  "chip_id": "AABBCCDDEEFF0011",
-  "firmware_version": "2.0.0-build...",
-  "schema_version": 1,
+  "device_id": "0000F09E9E76AEC4",
+  "device_name": "BME280-LoRa-001",
+  "location": "Office",
   "timestamp": 1234567890,
-  "temperature_c": 25.31,
-  "humidity_rh": 55.2,
-  "pressure_pa": 101325,
-  "pressure_hpa": 1013.25,
-  "altitude_m": 120.5,
-  "pressure_change_pa": -50,
-  "pressure_trend": "falling",
-  "baseline_hpa": 1013.75,
+  "sequence": 123,
+  "temperature": 25.31,
+  "humidity": 55.2,
+  "pressure": 1013.25,
+  "altitude": 120,
   "battery_voltage": 3.7,
-  "battery_percent": 85
+  "battery_percent": 85,
+  "pressure_change": -50,
+  "pressure_trend": 0,
+  "rssi": -85,
+  "snr": 8.5,
+  "gateway_time": 1234567890
 }
 ```
+
+### Status JSON
+
+```json
+{
+  "device_id": "0000F09E9E76AEC4",
+  "device_name": "BME280-LoRa-001",
+  "location": "Office",
+  "uptime": 3600,
+  "wake_count": 24,
+  "sensor_healthy": true,
+  "lora_rssi": -85,
+  "lora_snr": 8,
+  "free_heap_kb": 128,
+  "sensor_failures": 0,
+  "tx_failures": 0,
+  "last_success_tx": 1234567890,
+  "deep_sleep_sec": 90,
+  "rssi": -85,
+  "snr": 8.5
+}
+```
+
+### Events JSON
+
+```json
+{
+  "device_id": "0000F09E9E76AEC4",
+  "device_name": "BME280-LoRa-001",
+  "location": "Office",
+  "event_type": 1,
+  "severity": 0,
+  "message": "Device startup - wake count: 1",
+  "timestamp": 1234567890
+}
+```
+
+**Event Types:**
+- `1` = Startup, `2` = Shutdown
+- `16` = Sensor error, `17` = LoRa error
+- `32` = Config change, `33` = Restart
+
+**Severity:**
+- `0` = Info, `1` = Warning, `2` = Error, `3` = Critical
 
 ## Pin Configuration
 
@@ -112,16 +162,32 @@ The gateway will connect and remember your WiFi credentials.
 
 ### 4. Add Sensors
 
-When a new sensor transmits, the gateway auto-detects it and creates a default name like `Unknown-AABBCCDD`.
+Sensors automatically register when they send their first status message. The gateway extracts the device name and location from the status payload and updates the registry.
 
-To set a friendly name, publish an MQTT message:
+**Sensor sends:**
+- Device name from `/data/device_name.txt` (e.g., "BME280-LoRa-001")
+- Location from config or GPS (future feature)
 
-```bash
-mosquitto_pub -h YOUR_BROKER -t esp-sensor-hub/gateway/register \
-  -m '{"device_id": "AABBCCDDEEFF0011", "name": "Kitchen-BME280"}'
+**Gateway automatically:**
+- Creates registry entry with full 64-bit device ID
+- Updates MQTT topics: `esp-sensor-hub/0000F09E9E76AEC4/*`
+- Includes friendly name in all JSON messages
+
+**Manual override** (optional):
+
+Edit `/data/sensor_registry.json` and re-upload filesystem:
+
+```json
+{
+  "devices": [
+    {
+      "id": "0000F09E9E76AEC4",
+      "name": "Kitchen-BME280",
+      "location": "Kitchen"
+    }
+  ]
+}
 ```
-
-Or edit `/data/sensor_registry.json` directly and re-upload filesystem.
 
 ## Architecture
 
@@ -130,14 +196,18 @@ Or edit `/data/sensor_registry.json` directly and re-upload filesystem.
 **Core 0** (LoRa RX Task):
 - Continuous LoRa receive mode
 - Interrupt-driven packet reception
-- Packet validation and deduplication
+- Packet validation and deduplication (per-device, 50-entry circular buffer)
+- Clear deduplication buffer on sensor restart (EVENT_STARTUP)
 - Push valid packets to queue
+- Thread-safe radio access with FreeRTOS mutex
 
 **Core 1** (MQTT Task):
 - Pop packets from queue
+- Trigger command retry for active sensor (RX window open)
 - Convert binary → JSON
-- Publish to MQTT broker
-- Handle incoming MQTT commands
+- Auto-update device registry from status messages
+- Publish to MQTT broker with full 64-bit device IDs
+- Handle incoming MQTT commands with persistent retry queue
 - WiFi management
 - OTA updates
 - OLED display updates
@@ -160,19 +230,29 @@ MQTT Broker
 Your monitoring system
 ```
 
-### Command Flow
+### Command Flow (with Retry Mechanism)
 
 ```
-MQTT command → esp-sensor-hub/{device}/command
+MQTT command → lora/command
     ↓
-Gateway Core 1 receives
-    ↓ (lookup device ID)
-Binary LoRa packet
+Gateway receives and queues command (5 min expiration)
     ↓
-Gateway Core 0 transmits
+Sensor transmits data packet
     ↓
-Sensor receives and executes
+Gateway receives packet, opens sensor's RX window
+    ↓
+Gateway retries queued command via LoRa
+    ↓
+Sensor receives during RX window and executes
+    ↓
+Gateway removes command from queue on success
 ```
+
+**Key features:**
+- Commands persist in queue until received or expired (5 minutes)
+- Automatic retry on every sensor transmission
+- Sensor only listens briefly after each transmission
+- Thread-safe radio access with FreeRTOS mutex
 
 ## Supported Commands
 
@@ -182,23 +262,25 @@ Commands use JSON format with the following structure:
 
 ```json
 {
-  "device_id": "9e76aec4",   // Last 8 hex digits of sensor device ID
-  "action": "set_interval",   // Command type
-  "value": 90                 // Optional value (for set_interval, set_sleep)
+  "device_id": "0000F09E9E76AEC4",   // Full 64-bit device ID (16 hex chars)
+  "action": "set_interval",           // Command type
+  "value": 90                         // Optional value (for set_interval, set_sleep, set_baseline)
 }
 ```
+
+**Important:** Use the full 16-character device ID, not the shortened version.
 
 ### Available Actions
 
 | Action | Value | Description | Example |
 |--------|-------|-------------|---------|
-| `set_interval` | Integer (seconds) | Set sensor reading interval (5-3600s) | `{"device_id":"9e76aec4","action":"set_interval","value":90}` |
-| `set_sleep` | Integer (seconds) | Set deep sleep duration (0-3600s) | `{"device_id":"9e76aec4","action":"set_sleep","value":900}` |
-| `calibrate` | None | Set current pressure as baseline | `{"device_id":"9e76aec4","action":"calibrate"}` |
-| `set_baseline` | Float (hPa) | Set specific pressure baseline (900-1100 hPa) | `{"device_id":"9e76aec4","action":"set_baseline","value":1013.25}` |
-| `clear_baseline` | None | Disable pressure baseline tracking | `{"device_id":"9e76aec4","action":"clear_baseline"}` |
-| `status` | None | Request immediate status update | `{"device_id":"9e76aec4","action":"status"}` |
-| `restart` | None | Restart sensor device | `{"device_id":"9e76aec4","action":"restart"}` |
+| `set_interval` | Integer (seconds) | Set sensor reading interval (5-3600s) | `{"device_id":"0000F09E9E76AEC4","action":"set_interval","value":90}` |
+| `set_sleep` | Integer (seconds) | Set deep sleep duration (0-3600s) | `{"device_id":"0000F09E9E76AEC4","action":"set_sleep","value":900}` |
+| `calibrate` | None | Set current pressure as baseline | `{"device_id":"0000F09E9E76AEC4","action":"calibrate"}` |
+| `set_baseline` | Float (hPa) | Set specific pressure baseline (900-1100 hPa) | `{"device_id":"0000F09E9E76AEC4","action":"set_baseline","value":1013.25}` |
+| `clear_baseline` | None | Disable pressure baseline tracking | `{"device_id":"0000F09E9E76AEC4","action":"clear_baseline"}` |
+| `status` | None | Request immediate status update | `{"device_id":"0000F09E9E76AEC4","action":"status"}` |
+| `restart` | None | Restart sensor device | `{"device_id":"0000F09E9E76AEC4","action":"restart"}` |
 
 ### Using the Command Script (Recommended)
 
@@ -230,7 +312,7 @@ nano .env
 **Advanced Usage:**
 ```bash
 # Target different sensors
-./lora-cmd.sh -d aabbccdd interval 60
+./lora-cmd.sh -d 0000F09E9E76AEC4 interval 60
 
 # Override broker from .env
 ./lora-cmd.sh -b 192.168.1.100 interval 120
@@ -253,31 +335,31 @@ nano .env
 ```bash
 # Set reading interval to 90 seconds
 mosquitto_pub -h YOUR_BROKER -t "lora/command" \
-  -m '{"device_id":"9e76aec4","action":"set_interval","value":90}'
+  -m '{"device_id":"0000F09E9E76AEC4","action":"set_interval","value":90}'
 
 # Set deep sleep to 15 minutes
 mosquitto_pub -h YOUR_BROKER -t "lora/command" \
-  -m '{"device_id":"9e76aec4","action":"set_sleep","value":900}'
+  -m '{"device_id":"0000F09E9E76AEC4","action":"set_sleep","value":900}'
 
 # Calibrate pressure baseline (current reading)
 mosquitto_pub -h YOUR_BROKER -t "lora/command" \
-  -m '{"device_id":"9e76aec4","action":"calibrate"}'
+  -m '{"device_id":"0000F09E9E76AEC4","action":"calibrate"}'
 
 # Set specific pressure baseline
 mosquitto_pub -h YOUR_BROKER -t "lora/command" \
-  -m '{"device_id":"9e76aec4","action":"set_baseline","value":1013.25}'
+  -m '{"device_id":"0000F09E9E76AEC4","action":"set_baseline","value":1013.25}'
 
 # Clear pressure baseline
 mosquitto_pub -h YOUR_BROKER -t "lora/command" \
-  -m '{"device_id":"9e76aec4","action":"clear_baseline"}'
+  -m '{"device_id":"0000F09E9E76AEC4","action":"clear_baseline"}'
 
 # Request status update
 mosquitto_pub -h YOUR_BROKER -t "lora/command" \
-  -m '{"device_id":"9e76aec4","action":"status"}'
+  -m '{"device_id":"0000F09E9E76AEC4","action":"status"}'
 
 # Restart sensor
 mosquitto_pub -h YOUR_BROKER -t "lora/command" \
-  -m '{"device_id":"9e76aec4","action":"restart"}'
+  -m '{"device_id":"0000F09E9E76AEC4","action":"restart"}'
 ```
 
 ### Command Acknowledgments
@@ -286,13 +368,16 @@ When the gateway receives and processes a command, it publishes an acknowledgmen
 
 ```json
 {
-  "device_id": "9e76aec4",
+  "device_id": "0000F09E9E76AEC4",
   "action": "set_interval",
-  "status": "sent"
+  "status": "queued"
 }
 ```
 
-**Note:** The ack indicates the LoRa transmission was successful, not that the sensor executed the command.
+**Status values:**
+- `queued`: Command queued for retry (will be sent when sensor opens RX window)
+- Command will be retried automatically on every sensor transmission
+- Commands expire after 5 minutes if not received
 
 ## Device Registry
 
@@ -302,16 +387,15 @@ Located at `/data/sensor_registry.json`:
 {
   "devices": [
     {
-      "device_id": "AABBCCDDEEFF0011",
-      "name": "Kitchen-BME280",
-      "last_seen": 1234567890,
-      "rssi": -85,
-      "snr": 8,
-      "packet_count": 12345
+      "id": "0000F09E9E76AEC4",
+      "name": "BME280-LoRa-001",
+      "location": "Office"
     }
   ]
 }
 ```
+
+**Auto-update:** Gateway automatically updates `name` and `location` when sensor sends status messages.
 
 ## Troubleshooting
 
