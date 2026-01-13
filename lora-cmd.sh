@@ -18,8 +18,8 @@ MQTT_USER="${MQTT_USER:-}"
 MQTT_PASS="${MQTT_PASS:-}"
 MQTT_TOPIC="lora/command"
 
-# Default device ID (last 8 hex digits of sensor MAC)
-DEFAULT_DEVICE_ID="${DEFAULT_DEVICE_ID:-9e76aec4}"
+# Default device ID (full 16-character hex)
+DEFAULT_DEVICE_ID="${DEFAULT_DEVICE_ID:-0000F09E9E76AEC4}"
 
 # Colors for output
 GREEN='\033[0;32m'
