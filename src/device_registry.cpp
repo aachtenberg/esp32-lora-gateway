@@ -1,5 +1,6 @@
 #include "device_registry.h"
 #include "device_config.h"
+#include "command_sender.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 
@@ -422,6 +423,8 @@ String getDeviceRegistrySnapshot() {
     JsonDocument doc;
     JsonArray devicesArray = doc.to<JsonArray>();
     
+    uint32_t currentMillis = millis();
+    
     for (int i = 0; i < deviceCount; i++) {
         JsonObject deviceObj = devicesArray.add<JsonObject>();
         
@@ -429,14 +432,22 @@ String getDeviceRegistrySnapshot() {
         char idStr[20];
         snprintf(idStr, sizeof(idStr), "%016llX", devices[i].deviceId);
         
+        // Calculate seconds since last seen
+        uint32_t elapsedMs = currentMillis - devices[i].lastSeen;
+        uint32_t elapsedSeconds = elapsedMs / 1000;
+        
         deviceObj["id"] = idStr;
         deviceObj["name"] = devices[i].deviceName;
         deviceObj["location"] = devices[i].location;
-        deviceObj["lastSeen"] = devices[i].lastSeen;
+        deviceObj["lastSeenSeconds"] = elapsedSeconds;  // Send elapsed seconds instead of timestamp
         deviceObj["lastRssi"] = devices[i].lastRssi;
         deviceObj["lastSnr"] = devices[i].lastSnr;
         deviceObj["packetCount"] = devices[i].packetCount;
         deviceObj["lastSequence"] = devices[i].lastSequence;
+        
+        // Add command queue info
+        deviceObj["cmdQueueCount"] = getQueuedCommandCount(devices[i].deviceId);
+        deviceObj["cmdQueue"] = serialized(getQueuedCommandsJson(devices[i].deviceId));
     }
     
     UNLOCK_REGISTRY();

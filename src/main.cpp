@@ -13,6 +13,7 @@
 #include "display_manager.h"
 #include "command_sender.h"
 #include "command_tester.h"
+#include "web_server.h"
 
 // Watchdog timeout (seconds)
 #define WDT_TIMEOUT 30
@@ -88,6 +89,10 @@ void setup() {
         Serial.println("WARNING: MQTT initialization failed");
         // Continue anyway - will retry in loop
     }
+
+    // Initialize web dashboard
+    Serial.println("Initializing web dashboard...");
+    initWebServer();
 
     // Initialize LoRa receiver
     Serial.println("Initializing LoRa receiver...");

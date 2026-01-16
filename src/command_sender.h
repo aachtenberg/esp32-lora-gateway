@@ -112,4 +112,20 @@ bool sendSetBaselineCommand(uint64_t sensorId, float baselineHpa);
  */
 bool sendClearBaselineCommand(uint64_t sensorId);
 
+/**
+ * Get number of queued commands for a specific sensor
+ * 
+ * @param sensorId: 64-bit device ID of sensor
+ * @return number of commands in queue for this sensor
+ */
+int getQueuedCommandCount(uint64_t sensorId);
+
+/**
+ * Get JSON array of queued commands for a specific sensor
+ * 
+ * @param sensorId: 64-bit device ID of sensor
+ * @return JSON string with array of command types
+ */
+String getQueuedCommandsJson(uint64_t sensorId);
+
 #endif // COMMAND_SENDER_H
