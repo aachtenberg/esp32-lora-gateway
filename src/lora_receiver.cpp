@@ -6,6 +6,7 @@
 #include "display_manager.h"
 #include <RadioLib.h>
 #include <SPI.h>
+#include <esp_task_wdt.h>
 
 // SX1262 module instance
 static SX1262* radio = nullptr;
@@ -139,9 +140,15 @@ bool initLoRaReceiver() {
 void loraRxTask(void* parameter) {
     Serial.println("[LoRa RX Task] Started on Core 0");
     
+    // Subscribe this task to the watchdog
+    esp_task_wdt_add(NULL);
+    
     uint8_t rxBuffer[sizeof(LoRaPacketHeader) + LORA_MAX_PAYLOAD_SIZE];
     
     while (true) {
+        // Feed watchdog at start of loop
+        esp_task_wdt_reset();
+        
         // Poll for packet availability
         // In "startReceive" mode (interrupt-based logic but without ISR callback),
         // we can poll the IRQ pin manually or ask the radio object.

@@ -7,6 +7,7 @@
 #include <PubSubClient.h>
 #include <WiFi.h>
 #include <ArduinoJson.h>
+#include <esp_task_wdt.h>
 
 #ifdef OLED_ENABLED
 #include "display_manager.h"
@@ -66,6 +67,9 @@ bool initMqttBridge() {
 void mqttTask(void* parameter) {
     Serial.println("[MQTT Task] Started on Core 1");
     
+    // Subscribe this task to the watchdog
+    esp_task_wdt_add(NULL);
+    
     // Wait for packet queue to be initialized
     QueueHandle_t packetQueue = NULL;
     while (packetQueue == NULL) {
@@ -73,12 +77,16 @@ void mqttTask(void* parameter) {
         if (packetQueue == NULL) {
             Serial.println("[MQTT Task] Waiting for packet queue...");
             vTaskDelay(pdMS_TO_TICKS(1000));
+            esp_task_wdt_reset();  // Feed watchdog while waiting
         }
     }
     
     ReceivedPacket packet;
     
     while (true) {
+        // Feed watchdog at start of loop
+        esp_task_wdt_reset();
+        
         // Maintain MQTT connection
         if (!mqttClient.connected()) {
             uint32_t now = millis();

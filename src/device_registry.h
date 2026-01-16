@@ -17,6 +17,9 @@ struct DeviceInfo {
     uint8_t bufferIndex;      // Circular buffer index
 };
 
+// Thread-safe access functions
+// NOTE: For web server, use getDeviceRegistrySnapshot() to avoid holding mutex too long
+
 // Initialize device registry
 void initDeviceRegistry();
 
@@ -55,5 +58,8 @@ bool saveRegistry();
 
 // Load registry from SPIFFS
 bool loadRegistry();
+
+// Get thread-safe snapshot of all devices (for web server)
+String getDeviceRegistrySnapshot();
 
 #endif // DEVICE_REGISTRY_H
