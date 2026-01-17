@@ -2,9 +2,9 @@
 
 ## Status
 
-**Current:** Database integration implemented but **disabled by default**  
-**Mode:** Dual-write mode (JSON registry + optional database)  
-**API:** REST API wrapper around PostgreSQL
+**Current:** Database integration implemented and **enabled by default**
+**Mode:** Dual-write mode (JSON registry + database)
+**API:** REST API wrapper around PostgreSQL (default: http://192.168.0.167:3000/api)
 
 ## Architecture
 
@@ -22,19 +22,15 @@ ESP32 Gateway → HTTP POST → REST API → PostgreSQL
 
 ## Setup
 
-### 1. Enable Database Integration
+### 1. Database Integration Status
 
-Edit `src/database_manager.cpp` and change:
-
-```cpp
-#define DB_API_ENABLED false
-```
-
-to:
+Database integration is **enabled by default** in `src/database_manager.cpp`:
 
 ```cpp
 #define DB_API_ENABLED true
 ```
+
+To disable database integration, change this to `false`.
 
 ### 2. Set API URL
 
@@ -92,7 +88,13 @@ Or if unavailable:
 
 ## Current Behavior
 
-With `DB_API_ENABLED false` (default):
+With `DB_API_ENABLED true` (default):
+- Database manager attempts connection to API on startup
+- Queues writes in RAM if API unavailable
+- Retries every 30 seconds
+- LoRa operations continue normally regardless of database status
+
+With `DB_API_ENABLED false`:
 - Database manager is disabled
 - No network calls made
 - No performance impact
