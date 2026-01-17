@@ -110,7 +110,7 @@ void mqttTask(void* parameter) {
             // Wait for sensor to be ready to receive commands
             // Sensor needs ~2 seconds after TX: display operations + RX setup
             Serial.println("⏱️  Waiting 3 seconds for sensor to enter RX mode...");
-            delay(3000);
+            vTaskDelay(pdMS_TO_TICKS(3000));
             
             // Retry any queued commands for this sensor (it's now in RX window)
             uint32_t cmdSendMs = millis();

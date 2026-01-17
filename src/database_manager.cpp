@@ -3,7 +3,7 @@
 DatabaseManager dbManager;
 
 // REST API base URL - will be set from environment or use direct PostgreSQL REST wrapper
-// ✅ Enabled - API service running on 192.168.0.167:3000
+// ✅ Enabled by default - API service running on 192.168.0.167:3000
 #define DB_API_ENABLED true
 #ifndef DB_API_URL
 #define DB_API_URL "http://192.168.0.167:3000/api"
@@ -163,7 +163,10 @@ bool DatabaseManager::writeDevice(uint64_t deviceId, const String& name, const S
 #endif
     
     JsonDocument doc;
-    doc["device_id"] = String((unsigned long)deviceId);
+    // Convert uint64_t to string to avoid truncation on 32-bit systems
+    char deviceIdStr[32];
+    snprintf(deviceIdStr, sizeof(deviceIdStr), "%llu", (unsigned long long)deviceId);
+    doc["device_id"] = deviceIdStr;
     doc["name"] = name;
     doc["location"] = location;
     doc["last_rssi"] = rssi;
@@ -196,7 +199,10 @@ bool DatabaseManager::writeCommand(uint64_t deviceId, uint8_t commandType, const
 #endif
     
     JsonDocument doc;
-    doc["device_id"] = String((unsigned long)deviceId);
+    // Convert uint64_t to string to avoid truncation on 32-bit systems
+    char deviceIdStr[32];
+    snprintf(deviceIdStr, sizeof(deviceIdStr), "%llu", (unsigned long long)deviceId);
+    doc["device_id"] = deviceIdStr;
     doc["command_type"] = commandType;
     doc["parameters"] = params;
     doc["status"] = statusStr;
@@ -216,7 +222,10 @@ bool DatabaseManager::writeEvent(uint64_t deviceId, uint8_t eventType, uint8_t s
 #endif
     
     JsonDocument doc;
-    doc["device_id"] = String((unsigned long)deviceId);
+    // Convert uint64_t to string to avoid truncation on 32-bit systems
+    char deviceIdStr[32];
+    snprintf(deviceIdStr, sizeof(deviceIdStr), "%llu", (unsigned long long)deviceId);
+    doc["device_id"] = deviceIdStr;
     doc["event_type"] = eventType;
     doc["severity"] = severity;
     doc["message"] = message;
