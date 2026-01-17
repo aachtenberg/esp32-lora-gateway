@@ -1,0 +1,21 @@
+title = "ESP32 LoRa Gateway Gitleaks Config"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "esp32-secrets-h"
+description = "Detect secrets.h with actual values"
+regex = '''(?i)(mqtt_password|wifi_password|ota_password)\s*=\s*["\'].{8,}["\']'''
+path = '''secrets\.h$'''
+
+[[rules]]
+id = "postgresql-password"
+description = "PostgreSQL password"
+regex = '''(?i)(password|PASSWORD)\s*[:=]\s*[A-Za-z0-9+/]{20,}={0,2}'''
+
+[allowlist]
+paths = [
+    '''.*\.example$''',
+    '''.*\.md$''',
+]
