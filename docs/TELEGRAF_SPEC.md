@@ -217,7 +217,7 @@ CREATE INDEX idx_events_device_time ON events(device_id, received_at DESC);
 
 # PostgreSQL Output
 [[outputs.postgresql]]
-  address = "host=192.168.0.167 port=5432 user=sre_agent password=3KNXAdSdHxtqzA4mhOjz5nJRoPuxM9yjEIn/05jeKRk= dbname=iot_sensors sslmode=disable"
+  address = "host=${PG_HOST} port=5432 user=${PG_USER} password=${PG_PASSWORD} dbname=${PG_DATABASE} sslmode=disable"
   
   # Connection pool
   max_connections = 5
