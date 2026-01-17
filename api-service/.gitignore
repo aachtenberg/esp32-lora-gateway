@@ -8,3 +8,7 @@ api-service
 *.test
 *.out
 vendor/
+
+# Environment files with secrets
+.env
+.env.local

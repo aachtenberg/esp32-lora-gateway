@@ -195,6 +195,7 @@ void updateDeviceInfo(uint64_t deviceId, uint16_t seqNum, int16_t rssi, int8_t s
         deviceId,
         device->deviceName,
         device->location,
+        device->sensorType,
         rssi,
         snr,
         device->packetCount,
@@ -274,6 +275,7 @@ void addDevice(uint64_t deviceId, const String& name, const String& location) {
     devices[deviceCount].deviceId = deviceId;
     devices[deviceCount].deviceName = name;
     devices[deviceCount].location = location;
+    devices[deviceCount].sensorType = "Unknown";
     devices[deviceCount].lastSeen = millis();
     devices[deviceCount].lastRssi = 0;
     devices[deviceCount].lastSnr = 0;
@@ -318,17 +320,68 @@ DeviceInfo* getDeviceInfo(uint64_t deviceId) {
  */
 void updateDeviceConfig(uint64_t deviceId, uint16_t sensorInterval, uint16_t deepSleep) {
     LOCK_REGISTRY();
-    
+
     for (int i = 0; i < deviceCount; i++) {
         if (devices[i].deviceId == deviceId) {
+            // Only save if values changed
+            bool changed = (devices[i].sensorInterval != sensorInterval) ||
+                          (devices[i].deepSleepSec != deepSleep);
             devices[i].sensorInterval = sensorInterval;
             devices[i].deepSleepSec = deepSleep;
+            UNLOCK_REGISTRY();
+            if (changed) {
+                saveRegistry();  // Persist changes
+            }
+            return;
+        }
+    }
+
+    UNLOCK_REGISTRY();
+}
+
+/**
+ * Update device sensor type
+ * Called when sensor type is detected from readings
+ */
+void updateDeviceSensorType(uint64_t deviceId, const char* sensorType) {
+    LOCK_REGISTRY();
+
+    for (int i = 0; i < deviceCount; i++) {
+        if (devices[i].deviceId == deviceId) {
+            // Only update if type changed
+            if (!devices[i].sensorType.equals(sensorType)) {
+                Serial.printf("🔧 Device sensor type: %s -> %s\n",
+                             devices[i].sensorType.c_str(), sensorType);
+                devices[i].sensorType = sensorType;
+                UNLOCK_REGISTRY();
+                saveRegistry();  // Persist changes
+                return;
+            }
             UNLOCK_REGISTRY();
             return;
         }
     }
-    
+
     UNLOCK_REGISTRY();
+}
+
+/**
+ * Get device sensor type
+ * Returns "BME280", "DS18B20", or "Unknown"
+ */
+String getDeviceSensorType(uint64_t deviceId) {
+    LOCK_REGISTRY();
+
+    for (int i = 0; i < deviceCount; i++) {
+        if (devices[i].deviceId == deviceId) {
+            String type = devices[i].sensorType;
+            UNLOCK_REGISTRY();
+            return type;
+        }
+    }
+
+    UNLOCK_REGISTRY();
+    return "Unknown";
 }
 
 /**
@@ -363,8 +416,11 @@ bool saveRegistry() {
         deviceObj["id"] = idStr;
         deviceObj["name"] = devices[i].deviceName;
         deviceObj["location"] = devices[i].location;
+        deviceObj["sensorType"] = devices[i].sensorType;
         deviceObj["lastSeen"] = devices[i].lastSeen;
         deviceObj["packetCount"] = devices[i].packetCount;
+        deviceObj["sensorInterval"] = devices[i].sensorInterval;
+        deviceObj["deepSleepSec"] = devices[i].deepSleepSec;
     }
     
     UNLOCK_REGISTRY();
@@ -431,14 +487,15 @@ bool loadRegistry() {
         
         devices[deviceCount].deviceName = deviceObj["name"] | "Unknown";
         devices[deviceCount].location = deviceObj["location"] | "Unknown";
+        devices[deviceCount].sensorType = deviceObj["sensorType"] | "Unknown";
         devices[deviceCount].lastSeen = deviceObj["lastSeen"] | 0;
         devices[deviceCount].packetCount = deviceObj["packetCount"] | 0;
         devices[deviceCount].lastRssi = 0;
         devices[deviceCount].lastSnr = 0;
         devices[deviceCount].lastSequence = 0;
         devices[deviceCount].bufferIndex = 0;
-        devices[deviceCount].sensorInterval = 60;  // Default
-        devices[deviceCount].deepSleepSec = 90;    // Default
+        devices[deviceCount].sensorInterval = deviceObj["sensorInterval"] | 60;
+        devices[deviceCount].deepSleepSec = deviceObj["deepSleepSec"] | 90;
         
         // Clear deduplication buffer (set to invalid sequence numbers)
         for (int j = 0; j < DEDUP_BUFFER_SIZE; j++) {
@@ -479,6 +536,7 @@ String getDeviceRegistrySnapshot() {
         deviceObj["id"] = idStr;
         deviceObj["name"] = devices[i].deviceName;
         deviceObj["location"] = devices[i].location;
+        deviceObj["sensorType"] = devices[i].sensorType;
         deviceObj["lastSeenSeconds"] = elapsedSeconds;  // Send elapsed seconds instead of timestamp
         deviceObj["lastRssi"] = devices[i].lastRssi;
         deviceObj["lastSnr"] = devices[i].lastSnr;

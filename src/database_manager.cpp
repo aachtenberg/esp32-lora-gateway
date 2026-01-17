@@ -156,12 +156,12 @@ void DatabaseManager::queueWrite(const String& endpoint, const JsonDocument& doc
 }
 
 bool DatabaseManager::writeDevice(uint64_t deviceId, const String& name, const String& location,
-                                  int16_t rssi, int16_t snr, uint32_t packetCount,
+                                  const String& sensorType, int16_t rssi, int16_t snr, uint32_t packetCount,
                                   uint16_t lastSequence, uint16_t sensorInterval, uint16_t deepSleep) {
 #if !DB_API_ENABLED
     return false;  // Silently skip if disabled
 #endif
-    
+
     JsonDocument doc;
     // Convert uint64_t to string to avoid truncation on 32-bit systems
     char deviceIdStr[32];
@@ -169,6 +169,7 @@ bool DatabaseManager::writeDevice(uint64_t deviceId, const String& name, const S
     doc["device_id"] = deviceIdStr;
     doc["name"] = name;
     doc["location"] = location;
+    doc["sensor_type"] = sensorType;
     doc["last_rssi"] = rssi;
     doc["last_snr"] = snr;
     doc["packet_count"] = packetCount;

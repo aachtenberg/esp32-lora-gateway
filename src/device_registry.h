@@ -8,6 +8,7 @@ struct DeviceInfo {
     uint64_t deviceId;        // LoRa device ID (chip ID)
     String deviceName;        // Descriptive device name
     String location;          // Physical location of device
+    String sensorType;        // Sensor type: "BME280", "DS18B20", or "Unknown"
     uint32_t lastSeen;        // Timestamp of last packet
     int16_t lastRssi;         // Last RSSI value
     int8_t lastSnr;           // Last SNR value
@@ -51,6 +52,12 @@ void updateDeviceLocation(uint64_t deviceId, const String& location);
 
 // Update device config (sensor interval and deep sleep)
 void updateDeviceConfig(uint64_t deviceId, uint16_t sensorInterval, uint16_t deepSleep);
+
+// Update device sensor type (BME280, DS18B20, etc.)
+void updateDeviceSensorType(uint64_t deviceId, const char* sensorType);
+
+// Get device sensor type
+String getDeviceSensorType(uint64_t deviceId);
 
 // Get device info by ID
 DeviceInfo* getDeviceInfo(uint64_t deviceId);

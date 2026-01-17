@@ -439,28 +439,40 @@ const char index_html[] PROGMEM = R"rawliteral(
         }
         
         function loadSensors() {
+            // Skip refresh if user is editing an input field
+            const activeEl = document.activeElement;
+            if (activeEl && activeEl.tagName === 'INPUT') {
+                return;
+            }
+
             fetch('/api/devices')
             .then(r => r.json())
             .then(devices => {
                 const container = document.getElementById('sensors');
                 document.getElementById('sensor-count').textContent = devices.length;
-                
+
                 if (devices.length === 0) {
                     container.innerHTML = '<div class="loading"><p>No sensors registered yet</p></div>';
                     return;
                 }
-                
+
                 // Preserve input values before refresh
                 const savedValues = {};
                 document.querySelectorAll('input[type="number"]').forEach(input => {
                     savedValues[input.id] = input.value;
                 });
                 
-                container.innerHTML = devices.map(d => `
+                container.innerHTML = devices.map(d => {
+                    const isBME280 = d.sensorType === 'BME280';
+                    const sensorBadge = d.sensorType === 'DS18B20' ? '🌡️' : d.sensorType === 'BME280' ? '🌤️' : '❓';
+                    return `
                     <div class="sensor-card">
                         <div class="sensor-header">
-                            <div class="sensor-name">${d.name}</div>
-                            <div class="status">ONLINE</div>
+                            <div class="sensor-name">${sensorBadge} ${d.name}</div>
+                            <div style="display:flex;gap:8px;align-items:center;">
+                                <span style="color:#888;font-size:0.8em;">${d.sensorType || 'Unknown'}</span>
+                                <div class="status">ONLINE</div>
+                            </div>
                         </div>
                         <div class="sensor-stats">
                             <div class="stat">
@@ -490,7 +502,7 @@ const char index_html[] PROGMEM = R"rawliteral(
                             <div class="stat" style="grid-column: span 2; ${d.cmdQueueCount > 0 ? 'background: #1e3a5f; border: 1px solid #2563eb;' : ''}">
                                 <div class="stat-label">Command Queue</div>
                                 <div class="stat-value">
-                                    ${d.cmdQueueCount > 0 
+                                    ${d.cmdQueueCount > 0
                                         ? d.cmdQueueCount + ' pending: ' + d.cmdQueue.map(c => c.type + (c.retries > 0 ? ' (retry ' + c.retries + ')' : '')).join(', ')
                                         : 'Empty'}
                                 </div>
@@ -499,8 +511,8 @@ const char index_html[] PROGMEM = R"rawliteral(
                         <div class="commands">
                             <button onclick="sendCommand('${d.id}', 'status')">📊 Status</button>
                             <button class="btn-danger" onclick="sendCommand('${d.id}', 'restart')">🔄 Restart</button>
-                            <button onclick="sendCommand('${d.id}', 'calibrate')">🎯 Calibrate</button>
-                            <button onclick="sendCommand('${d.id}', 'clear_baseline')">🗑️ Clear Baseline</button>
+                            ${isBME280 ? `<button onclick="sendCommand('${d.id}', 'calibrate')">🎯 Calibrate</button>` : ''}
+                            ${isBME280 ? `<button onclick="sendCommand('${d.id}', 'clear_baseline')">🗑️ Clear Baseline</button>` : ''}
                             <div class="command-group">
                                 <label>Sleep Interval (seconds)</label>
                                 <input type="number" id="sleep_${d.id}" value="${d.deepSleepSec}" min="10" max="3600">
@@ -513,7 +525,7 @@ const char index_html[] PROGMEM = R"rawliteral(
                             </div>
                         </div>
                     </div>
-                `).join('');
+                `}).join('');
                 
                 // Restore saved input values after refresh (only if not focused)
                 Object.keys(savedValues).forEach(id => {

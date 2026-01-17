@@ -24,6 +24,7 @@ type DevicePayload struct {
 	DeviceID       string `json:"device_id"`
 	Name           string `json:"name"`
 	Location       string `json:"location"`
+	SensorType     string `json:"sensor_type"`
 	LastRSSI       int16  `json:"last_rssi"`
 	LastSNR        int16  `json:"last_snr"`
 	PacketCount    int32  `json:"packet_count"`
@@ -148,13 +149,14 @@ func devicesHandler(w http.ResponseWriter, r *http.Request) {
 	// UPSERT device
 	query := `
 		INSERT INTO devices (
-			device_id, name, location, last_rssi, last_snr,
+			device_id, name, location, sensor_type, last_rssi, last_snr,
 			packet_count, last_sequence, sensor_interval, deep_sleep_sec,
 			last_seen, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
+		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
 		ON CONFLICT (device_id) DO UPDATE SET
 			name = EXCLUDED.name,
 			location = EXCLUDED.location,
+			sensor_type = EXCLUDED.sensor_type,
 			last_rssi = EXCLUDED.last_rssi,
 			last_snr = EXCLUDED.last_snr,
 			packet_count = EXCLUDED.packet_count,
@@ -166,7 +168,7 @@ func devicesHandler(w http.ResponseWriter, r *http.Request) {
 	`
 
 	_, err := db.Exec(query,
-		payload.DeviceID, payload.Name, payload.Location,
+		payload.DeviceID, payload.Name, payload.Location, payload.SensorType,
 		payload.LastRSSI, payload.LastSNR, payload.PacketCount,
 		payload.LastSequence, payload.SensorInterval, payload.DeepSleepSec)
 

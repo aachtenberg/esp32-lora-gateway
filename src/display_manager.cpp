@@ -21,6 +21,7 @@ static float lastHumidity = 0.0;
 static float lastPressure = 0.0;
 static int8_t lastPressureTrend = 1;  // 0=falling, 1=steady, 2=rising
 static float lastPressureChange = 0.0;
+static bool lastIsTempOnly = false;   // DS18B20 = true, BME280 = false
 
 // Mutex for display rendering (to prevent corruption from concurrent access)
 static SemaphoreHandle_t displayMutex = nullptr;
@@ -252,26 +253,35 @@ void displayStatus(uint32_t packets, int deviceCount) {
         display->drawStr(0, 10, "LoRa Gateway");
 
         // Temperature and humidity (if we have data)
-        if (lastTemp != 0.0 || lastHumidity != 0.0) {
+        if (lastTemp != 0.0 || lastHumidity != 0.0 || lastIsTempOnly) {
             display->setFont(u8g2_font_6x10_tr);
-            snprintf(buffer, sizeof(buffer), "%.1fC  H:%.0f%%", lastTemp, lastHumidity);
-            display->drawStr(0, 24, buffer);
 
-            // Pressure with trend
-            const char* trendSymbol = "-";  // Steady
-            if (lastPressureTrend == 2) trendSymbol = "^";      // Rising
-            else if (lastPressureTrend == 0) trendSymbol = "v"; // Falling
+            if (lastIsTempOnly) {
+                // DS18B20: Temperature only, larger display
+                snprintf(buffer, sizeof(buffer), "Temp: %.1f C", lastTemp);
+                display->drawStr(0, 24, buffer);
+                display->drawStr(0, 37, "(DS18B20)");
+            } else {
+                // BME280: Full environmental data
+                snprintf(buffer, sizeof(buffer), "%.1fC  H:%.0f%%", lastTemp, lastHumidity);
+                display->drawStr(0, 24, buffer);
 
-            if (lastPressure > 0) {
-                snprintf(buffer, sizeof(buffer), "P:%.0f%s", lastPressure, trendSymbol);
-                display->drawStr(0, 37, buffer);
+                // Pressure with trend
+                const char* trendSymbol = "-";  // Steady
+                if (lastPressureTrend == 2) trendSymbol = "^";      // Rising
+                else if (lastPressureTrend == 0) trendSymbol = "v"; // Falling
 
-                // Pressure change (if baseline set)
-                if (lastPressureChange != 0.0) {
-                    display->setFont(u8g2_font_5x7_tf);
-                    snprintf(buffer, sizeof(buffer), "%+.1f", lastPressureChange);
-                    display->drawStr(70, 37, buffer);
-                    display->setFont(u8g2_font_6x10_tr);
+                if (lastPressure > 0) {
+                    snprintf(buffer, sizeof(buffer), "P:%.0f%s", lastPressure, trendSymbol);
+                    display->drawStr(0, 37, buffer);
+
+                    // Pressure change (if baseline set)
+                    if (lastPressureChange != 0.0) {
+                        display->setFont(u8g2_font_5x7_tf);
+                        snprintf(buffer, sizeof(buffer), "%+.1f", lastPressureChange);
+                        display->drawStr(70, 37, buffer);
+                        display->setFont(u8g2_font_6x10_tr);
+                    }
                 }
             }
         } else {
@@ -342,13 +352,25 @@ void displayPacketReceived(uint64_t deviceId, float temp, float humidity, int16_
 
 /**
  * Update stored sensor readings for display
+ * For DS18B20 (temperature-only), pass humidity=-1 and pressure=-1
  */
 void displayUpdateSensorData(float temp, float humidity, float pressure, int8_t pressureTrend, float pressureChange) {
     lastTemp = temp;
-    lastHumidity = humidity;
-    lastPressure = pressure;
-    lastPressureTrend = pressureTrend;
-    lastPressureChange = pressureChange;
+
+    // Detect DS18B20 (temperature-only sensor) when humidity and pressure are -1
+    if (humidity < 0 && pressure < 0) {
+        lastIsTempOnly = true;
+        lastHumidity = 0;
+        lastPressure = 0;
+        lastPressureTrend = 1;  // Steady (N/A)
+        lastPressureChange = 0;
+    } else {
+        lastIsTempOnly = false;
+        lastHumidity = humidity;
+        lastPressure = pressure;
+        lastPressureTrend = pressureTrend;
+        lastPressureChange = pressureChange;
+    }
 }
 
 /**

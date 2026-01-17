@@ -32,7 +32,7 @@ public:
     
     // Write operations (async)
     bool writeDevice(uint64_t deviceId, const String& name, const String& location,
-                    int16_t rssi, int16_t snr, uint32_t packetCount, 
+                    const String& sensorType, int16_t rssi, int16_t snr, uint32_t packetCount,
                     uint16_t lastSequence, uint16_t sensorInterval, uint16_t deepSleep);
     
     bool writePacket(uint64_t deviceId, const String& gatewayId, uint8_t msgType,

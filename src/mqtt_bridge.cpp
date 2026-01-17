@@ -144,6 +144,19 @@ void mqttTask(void* parameter) {
 }
 
 /**
+ * Detect sensor type from readings payload
+ * DS18B20 sensors send zero for humidity and pressure
+ */
+static const char* detectSensorType(const ReadingsPayload* readings) {
+    // DS18B20 temperature-only sensor: no humidity or pressure data
+    if (readings->humidity == 0 && readings->pressure == 0) {
+        return "DS18B20";
+    }
+    // BME280 environmental sensor: has all readings
+    return "BME280";
+}
+
+/**
  * Publish sensor readings to MQTT
  * Converts binary ReadingsPayload to JSON
  */
@@ -152,60 +165,76 @@ void publishReadings(const ReceivedPacket* packet) {
         Serial.println("⚠️  Invalid readings payload size");
         return;
     }
-    
+
     // Parse payload
     ReadingsPayload* readings = (ReadingsPayload*)packet->payload;
-    
+
+    // Detect sensor type
+    const char* sensorType = detectSensorType(readings);
+    bool isDS18B20 = (strcmp(sensorType, "DS18B20") == 0);
+
+    // Update device registry with sensor type
+    updateDeviceSensorType(packet->header.deviceId, sensorType);
+
     // Get device name and ID
     String deviceName = getDeviceName(packet->header.deviceId);
     String deviceLocation = getDeviceLocation(packet->header.deviceId);
     String deviceId = formatDeviceId(packet->header.deviceId);
-    
+
     // Build JSON
     JsonDocument doc;
     doc["device_id"] = deviceId;
     doc["device_name"] = deviceName;
     doc["location"] = deviceLocation;
+    doc["sensor_type"] = sensorType;
     doc["timestamp"] = readings->timestamp;
     doc["sequence"] = packet->header.sequenceNum;
-    
-    // Sensor data
+
+    // Sensor data - always include temperature
     doc["temperature"] = readings->temperature / 100.0;
-    doc["humidity"] = readings->humidity / 100.0;
-    doc["pressure"] = readings->pressure / 100.0;
-    doc["altitude"] = readings->altitude;
-    
+
+    // Only include BME280-specific fields if not DS18B20
+    if (!isDS18B20) {
+        doc["humidity"] = readings->humidity / 100.0;
+        doc["pressure"] = readings->pressure / 100.0;
+        doc["altitude"] = readings->altitude;
+        doc["pressure_change"] = readings->pressureChange;
+        doc["pressure_trend"] = readings->pressureTrend;  // 0=falling, 1=steady, 2=rising
+    }
+
     // Battery data
     doc["battery_voltage"] = readings->batteryVoltage / 1000.0;
     doc["battery_percent"] = readings->batteryPercent;
-    
-    // Pressure trend
-    doc["pressure_change"] = readings->pressureChange;
-    doc["pressure_trend"] = readings->pressureTrend;  // 0=falling, 1=steady, 2=rising
-    
+
     // LoRa metadata
     doc["rssi"] = packet->rssi;
     doc["snr"] = packet->snr;
     doc["gateway_time"] = packet->timestamp;
-    
+
     // Serialize to string
     String jsonString;
     serializeJson(doc, jsonString);
-    
+
     // Publish to MQTT
     String topic = String(MQTT_TOPIC_PREFIX) + deviceId + "/readings";
-    
+
     if (mqttClient.publish(topic.c_str(), jsonString.c_str(), false)) {
-        Serial.printf("✅ Published to %s\n", topic.c_str());
+        Serial.printf("✅ Published to %s (%s)\n", topic.c_str(), sensorType);
         Serial.println(jsonString);
-        
+
         // Update display with sensor readings (shown in main status screen)
 #ifdef OLED_ENABLED
-        displayUpdateSensorData(readings->temperature / 100.0,
-                               readings->humidity / 100.0,
-                               readings->pressure / 100.0,
-                               readings->pressureTrend,
-                               readings->pressureChange / 100.0);
+        if (isDS18B20) {
+            // DS18B20: only temperature
+            displayUpdateSensorData(readings->temperature / 100.0, -1, -1, -1, 0);
+        } else {
+            // BME280: all readings
+            displayUpdateSensorData(readings->temperature / 100.0,
+                                   readings->humidity / 100.0,
+                                   readings->pressure / 100.0,
+                                   readings->pressureTrend,
+                                   readings->pressureChange / 100.0);
+        }
 #endif
     } else {
         Serial.printf("❌ Failed to publish to %s\n", topic.c_str());

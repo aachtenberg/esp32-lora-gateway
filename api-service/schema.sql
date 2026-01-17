@@ -14,6 +14,7 @@ CREATE TABLE IF NOT EXISTS devices (
     device_id BIGINT PRIMARY KEY,
     name VARCHAR(64) NOT NULL,
     location VARCHAR(64),
+    sensor_type VARCHAR(20) DEFAULT 'Unknown',
     last_seen TIMESTAMP DEFAULT NOW(),
     last_rssi SMALLINT,
     last_snr SMALLINT,
