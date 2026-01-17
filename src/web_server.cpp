@@ -6,6 +6,7 @@
 #include "web_server.h"
 #include "device_registry.h"
 #include "command_sender.h"
+#include "database_manager.h"
 #include "lora_protocol.h"
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
@@ -90,6 +91,14 @@ const char index_html[] PROGMEM = R"rawliteral(
             font-weight: 500;
             background: #065f46;
             color: #10b981;
+        }
+        .status-badge.disconnected {
+            background: #7f1d1d;
+            color: #ef4444;
+        }
+        .status-badge.reconnecting {
+            background: #78350f;
+            color: #f59e0b;
         }
         .main-content {
             flex: 1;
@@ -233,6 +242,33 @@ const char index_html[] PROGMEM = R"rawliteral(
             border-radius: 50%;
             animation: spin 1s linear infinite;
         }
+        /* Toast notifications */
+        .toast {
+            position: fixed;
+            bottom: 30px;
+            right: 30px;
+            background: #1a1a1a;
+            color: #fff;
+            padding: 16px 20px;
+            border-radius: 8px;
+            border: 1px solid #2a2a2a;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.5);
+            font-size: 0.95em;
+            font-weight: 400;
+            z-index: 10000;
+            animation: slideIn 0.3s ease-out;
+            min-width: 250px;
+        }
+        .toast.success { border-color: #10b981; background: #065f46; }
+        .toast.error { border-color: #ef4444; background: #7f1d1d; }
+        @keyframes slideIn {
+            from { transform: translateX(400px); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+        @keyframes slideOut {
+            from { transform: translateX(0); opacity: 1; }
+            to { transform: translateX(400px); opacity: 0; }
+        }
     </style>
 </head>
 <body>
@@ -275,6 +311,13 @@ const char index_html[] PROGMEM = R"rawliteral(
                 </div>
                 
                 <div class="status-item">
+                    <div class="status-label">Database</div>
+                    <div class="status-value">
+                        <span class="status-badge" id="db-status">● CHECKING</span>
+                    </div>
+                </div>
+                
+                <div class="status-item">
                     <div class="status-label">LoRa Frequency</div>
                     <div class="status-value">915 MHz</div>
                 </div>
@@ -299,12 +342,22 @@ const char index_html[] PROGMEM = R"rawliteral(
                     <p>Loading sensors...</p>
                 </div>
             </div>
+            
+            <div class="content-header" style="margin-top: 40px;">
+                <h2>Recent Events</h2>
+                <div class="description">System and device event logs from database</div>
+            </div>
+            
+            <div id="events" style="background: #1a1a1a; border-radius: 12px; padding: 20px; margin-top: 20px;">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    <p>Loading events...</p>
+                </div>
+            </div>
         </div>
     </div>
     
     <script>
-        let gatewayStartTime = Date.now();
-        
         function formatTime(seconds) {
             if (seconds < 60) return seconds + 's ago';
             const min = Math.floor(seconds / 60);
@@ -317,16 +370,17 @@ const char index_html[] PROGMEM = R"rawliteral(
         
         function formatUptime(ms) {
             const sec = Math.floor(ms / 1000);
-            const hrs = Math.floor(sec / 3600);
+            const days = Math.floor(sec / 86400);
+            const hrs = Math.floor((sec % 86400) / 3600);
             const mins = Math.floor((sec % 3600) / 60);
             const secs = sec % 60;
+            if (days > 0) {
+                return `${days}d ${hrs}h ${mins}m`;
+            }
             return `${hrs}h ${mins}m ${secs}s`;
         }
         
         function updateGatewayStatus() {
-            // Update uptime
-            document.getElementById('uptime').textContent = formatUptime(Date.now() - gatewayStartTime);
-            
             // Fetch gateway stats
             fetch('/api/gateway')
             .then(r => r.json())
@@ -334,8 +388,34 @@ const char index_html[] PROGMEM = R"rawliteral(
                 document.getElementById('gateway-ip').textContent = data.ip || 'Unknown';
                 document.getElementById('wifi-rssi').textContent = data.wifi_rssi ? data.wifi_rssi + ' dBm' : 'Unknown';
                 document.getElementById('free-mem').textContent = data.free_heap ? Math.round(data.free_heap / 1024) + ' KB' : 'Unknown';
+                document.getElementById('uptime').textContent = data.uptime ? formatUptime(data.uptime) : 'Unknown';
+                
+                // Update database status
+                const dbBadge = document.getElementById('db-status');
+                if (data.db_status === 'connected') {
+                    dbBadge.textContent = '● CONNECTED';
+                    dbBadge.className = 'status-badge';
+                } else if (data.db_status === 'reconnecting') {
+                    dbBadge.textContent = '● RECONNECTING';
+                    dbBadge.className = 'status-badge reconnecting';
+                } else {
+                    dbBadge.textContent = '● DISCONNECTED';
+                    dbBadge.className = 'status-badge disconnected';
+                }
             })
             .catch(e => console.error('Gateway stats error:', e));
+        }
+        
+        function showToast(message, type = 'success') {
+            const toast = document.createElement('div');
+            toast.className = 'toast ' + type;
+            toast.textContent = message;
+            document.body.appendChild(toast);
+            
+            setTimeout(() => {
+                toast.style.animation = 'slideOut 0.3s ease-out';
+                setTimeout(() => toast.remove(), 300);
+            }, 3000);
         }
         
         function sendCommand(deviceId, action, value = null) {
@@ -350,12 +430,12 @@ const char index_html[] PROGMEM = R"rawliteral(
             .then(r => r.json())
             .then(data => {
                 if (data.success) {
-                    alert('✅ Command sent: ' + action);
+                    showToast('✅ Command sent: ' + action, 'success');
                 } else {
-                    alert('❌ Failed: ' + (data.error || 'Unknown error'));
+                    showToast('❌ Failed: ' + (data.error || 'Unknown error'), 'error');
                 }
             })
-            .catch(e => alert('❌ Error: ' + e.message));
+            .catch(e => showToast('❌ Error: ' + e.message, 'error'));
         }
         
         function loadSensors() {
@@ -423,22 +503,22 @@ const char index_html[] PROGMEM = R"rawliteral(
                             <button onclick="sendCommand('${d.id}', 'clear_baseline')">🗑️ Clear Baseline</button>
                             <div class="command-group">
                                 <label>Sleep Interval (seconds)</label>
-                                <input type="number" id="sleep_${d.id}" value="90" min="10" max="3600">
+                                <input type="number" id="sleep_${d.id}" value="${d.deepSleepSec}" min="10" max="3600">
                                 <button class="btn-success" style="margin-top:8px" onclick="sendCommand('${d.id}', 'set_sleep', document.getElementById('sleep_${d.id}').value)">Set Sleep</button>
                             </div>
                             <div class="command-group">
                                 <label>Sensor Interval (seconds)</label>
-                                <input type="number" id="interval_${d.id}" value="60" min="10" max="3600">
+                                <input type="number" id="interval_${d.id}" value="${d.sensorInterval}" min="10" max="3600">
                                 <button class="btn-success" style="margin-top:8px" onclick="sendCommand('${d.id}', 'set_interval', document.getElementById('interval_${d.id}').value)">Set Interval</button>
                             </div>
                         </div>
                     </div>
                 `).join('');
                 
-                // Restore saved input values after refresh
+                // Restore saved input values after refresh (only if not focused)
                 Object.keys(savedValues).forEach(id => {
                     const input = document.getElementById(id);
-                    if (input) {
+                    if (input && document.activeElement !== input) {
                         input.value = savedValues[id];
                     }
                 });
@@ -449,15 +529,54 @@ const char index_html[] PROGMEM = R"rawliteral(
             });
         }
         
+        function loadEvents() {
+            fetch('http://192.168.0.167:3000/api/events?limit=20')
+            .then(r => r.json())
+            .then(data => {
+                if (!data || data.length === 0) {
+                    document.getElementById('events').innerHTML = '<p style="color:#888;text-align:center;">No events yet</p>';
+                    return;
+                }
+                
+                const severityColors = { 0: '#10b981', 1: '#f59e0b', 2: '#ef4444' };
+                const severityLabels = { 0: 'INFO', 1: 'WARNING', 2: 'ERROR' };
+                
+                document.getElementById('events').innerHTML = '<table style="width:100%;border-collapse:collapse;">' +
+                    '<thead><tr style="border-bottom:1px solid #2a2a2a;"><th style="text-align:left;padding:12px;color:#00d4ff;font-weight:500;">Time</th>' +
+                    '<th style="text-align:left;padding:12px;color:#00d4ff;font-weight:500;">Device</th>' +
+                    '<th style="text-align:left;padding:12px;color:#00d4ff;font-weight:500;">Severity</th>' +
+                    '<th style="text-align:left;padding:12px;color:#00d4ff;font-weight:500;">Message</th></tr></thead><tbody>' +
+                    data.map(e => {
+                        const color = severityColors[e.severity] || '#888';
+                        const label = severityLabels[e.severity] || 'UNKNOWN';
+                        const time = new Date(e.received_at).toLocaleString();
+                        return `<tr style="border-bottom:1px solid #2a2a2a;">
+                            <td style="padding:12px;color:#888;font-size:0.85em;">${time}</td>
+                            <td style="padding:12px;color:#fff;">${e.device_name}</td>
+                            <td style="padding:12px;"><span style="background:${color}22;color:${color};padding:4px 8px;border-radius:4px;font-size:0.8em;font-weight:500;">${label}</span></td>
+                            <td style="padding:12px;color:#e0e0e0;">${e.message}</td>
+                        </tr>`;
+                    }).join('') +
+                    '</tbody></table>';
+            })
+            .catch(e => {
+                document.getElementById('events').innerHTML = '<p style="color:#888;text-align:center;">Database not available</p>';
+            });
+        }
+        
         // Load sensors and gateway status on page load
         loadSensors();
         updateGatewayStatus();
+        loadEvents();
         
         // Auto-refresh sensors every 5 seconds
         setInterval(loadSensors, 5000);
         
         // Update gateway status every 2 seconds
         setInterval(updateGatewayStatus, 2000);
+        
+        // Refresh events every 10 seconds
+        setInterval(loadEvents, 10000);
     </script>
 </body>
 </html>
@@ -488,9 +607,22 @@ void initWebServer() {
         doc["free_heap"] = ESP.getFreeHeap();
         doc["uptime"] = millis();
         
+        // Database status
+        DatabaseStatus dbStatus = dbManager.getStatus();
+        doc["db_status"] = (dbStatus == DB_CONNECTED) ? "connected" : 
+                           (dbStatus == DB_RECONNECTING) ? "reconnecting" : "disconnected";
+        doc["db_queue"] = dbManager.getQueueDepth();
+        
         String json;
         serializeJson(doc, json);
         request->send(200, "application/json", json);
+    });
+    
+    // API: Get recent events from database
+    server.on("/api/events", HTTP_GET, [](AsyncWebServerRequest *request){
+        // For now, return empty array - ESP32 doesn't query database
+        // Events are stored in PostgreSQL and can be viewed via API service directly
+        request->send(200, "application/json", "[]");
     });
     
     // API: Send command to sensor

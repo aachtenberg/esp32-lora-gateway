@@ -1,0 +1,10 @@
+# API service - ignore build artifacts
+api-service
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+*.test
+*.out
+vendor/

@@ -1,6 +1,7 @@
 #include "device_registry.h"
 #include "device_config.h"
 #include "command_sender.h"
+#include "database_manager.h"
 #include <LittleFS.h>
 #include <ArduinoJson.h>
 
@@ -189,6 +190,19 @@ void updateDeviceInfo(uint64_t deviceId, uint16_t seqNum, int16_t rssi, int8_t s
     device->sequenceBuffer[device->bufferIndex] = seqNum;
     device->bufferIndex = (device->bufferIndex + 1) % DEDUP_BUFFER_SIZE;
     
+    // Write to database (async, non-blocking)
+    dbManager.writeDevice(
+        deviceId,
+        device->deviceName,
+        device->location,
+        rssi,
+        snr,
+        device->packetCount,
+        seqNum,
+        device->sensorInterval,
+        device->deepSleepSec
+    );
+    
     UNLOCK_REGISTRY();
 }
 
@@ -266,9 +280,13 @@ void addDevice(uint64_t deviceId, const String& name, const String& location) {
     devices[deviceCount].packetCount = 0;
     devices[deviceCount].lastSequence = 0;
     devices[deviceCount].bufferIndex = 0;
+    devices[deviceCount].sensorInterval = 60;  // Default
+    devices[deviceCount].deepSleepSec = 90;    // Default
     
-    // Clear deduplication buffer
-    memset(devices[deviceCount].sequenceBuffer, 0, sizeof(devices[deviceCount].sequenceBuffer));
+    // Clear deduplication buffer (set to invalid sequence numbers)
+    for (int j = 0; j < DEDUP_BUFFER_SIZE; j++) {
+        devices[deviceCount].sequenceBuffer[j] = 0xFFFF;
+    }
     
     deviceCount++;
     
@@ -293,6 +311,24 @@ DeviceInfo* getDeviceInfo(uint64_t deviceId) {
         }
     }
     return nullptr;
+}
+
+/**
+ * Update device config (sensor interval and deep sleep)
+ */
+void updateDeviceConfig(uint64_t deviceId, uint16_t sensorInterval, uint16_t deepSleep) {
+    LOCK_REGISTRY();
+    
+    for (int i = 0; i < deviceCount; i++) {
+        if (devices[i].deviceId == deviceId) {
+            devices[i].sensorInterval = sensorInterval;
+            devices[i].deepSleepSec = deepSleep;
+            UNLOCK_REGISTRY();
+            return;
+        }
+    }
+    
+    UNLOCK_REGISTRY();
 }
 
 /**
@@ -401,9 +437,13 @@ bool loadRegistry() {
         devices[deviceCount].lastSnr = 0;
         devices[deviceCount].lastSequence = 0;
         devices[deviceCount].bufferIndex = 0;
+        devices[deviceCount].sensorInterval = 60;  // Default
+        devices[deviceCount].deepSleepSec = 90;    // Default
         
-        // Clear deduplication buffer
-        memset(devices[deviceCount].sequenceBuffer, 0, sizeof(devices[deviceCount].sequenceBuffer));
+        // Clear deduplication buffer (set to invalid sequence numbers)
+        for (int j = 0; j < DEDUP_BUFFER_SIZE; j++) {
+            devices[deviceCount].sequenceBuffer[j] = 0xFFFF;
+        }
         
         deviceCount++;
     }
@@ -444,6 +484,8 @@ String getDeviceRegistrySnapshot() {
         deviceObj["lastSnr"] = devices[i].lastSnr;
         deviceObj["packetCount"] = devices[i].packetCount;
         deviceObj["lastSequence"] = devices[i].lastSequence;
+        deviceObj["sensorInterval"] = devices[i].sensorInterval;
+        deviceObj["deepSleepSec"] = devices[i].deepSleepSec;
         
         // Add command queue info
         deviceObj["cmdQueueCount"] = getQueuedCommandCount(devices[i].deviceId);

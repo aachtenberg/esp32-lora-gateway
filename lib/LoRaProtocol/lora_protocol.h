@@ -74,6 +74,9 @@ struct StatusPayload {
     uint16_t txFailures;      // LoRa TX failure counter
     uint32_t lastSuccessTx;   // Timestamp of last successful TX
     uint16_t deepSleepSec;    // Current deep sleep interval
+    uint16_t sensorIntervalSec; // Sensor reading interval
+    uint16_t timeOnAir;       // Last transmission time-on-air (ms)
+    int8_t   txPower;         // Transmit power (dBm)
     char     deviceName[32];  // Device name (null-terminated)
     char     location[32];    // Location (manual or GPS, null-terminated)
 } __attribute__((packed));

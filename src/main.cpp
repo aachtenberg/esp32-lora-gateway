@@ -14,6 +14,7 @@
 #include "command_sender.h"
 #include "command_tester.h"
 #include "web_server.h"
+#include "database_manager.h"
 
 // Watchdog timeout (seconds)
 #define WDT_TIMEOUT 30
@@ -78,6 +79,10 @@ void setup() {
     // Initialize device registry
     Serial.println("Initializing device registry...");
     initDeviceRegistry();
+
+    // Initialize database manager
+    Serial.println("Initializing database manager...");
+    dbManager.init();
 
     // Initialize command sender with retry mechanism
     Serial.println("Initializing command sender...");
@@ -145,6 +150,9 @@ void loop() {
 
     // Handle OTA updates
     ArduinoOTA.handle();
+
+    // Handle database operations
+    dbManager.loop();
 
     // Check WiFi connection
     static uint32_t lastWiFiCheck = 0;
