@@ -1,6 +1,7 @@
 #include <Arduino.h>
 #include <WiFi.h>
 #include <ArduinoOTA.h>
+#include <esp_task_wdt.h>
 #include "device_config.h"
 #include "lora_config.h"
 #include "version.h"
@@ -12,6 +13,11 @@
 #include "display_manager.h"
 #include "command_sender.h"
 #include "command_tester.h"
+#include "web_server.h"
+#include "database_manager.h"
+
+// Watchdog timeout (seconds)
+#define WDT_TIMEOUT 30
 
 // FreeRTOS task handles
 TaskHandle_t loraRxTaskHandle = NULL;
@@ -26,6 +32,12 @@ void setup() {
     Serial.println("====================================");
     Serial.printf("Firmware: %s\n", getFirmwareVersion().c_str());
     Serial.printf("Build: %s %s\n", BUILD_DATE, BUILD_TIME);
+    
+    // Configure Task Watchdog Timer
+    Serial.printf("Configuring watchdog timer (%d seconds)... ", WDT_TIMEOUT);
+    esp_task_wdt_init(WDT_TIMEOUT, true);  // 30 second timeout, panic on timeout
+    esp_task_wdt_add(NULL);  // Add current task (setup/loop)
+    Serial.println("✅");
 
 #ifdef OLED_ENABLED
     // Initialize OLED display
@@ -68,6 +80,10 @@ void setup() {
     Serial.println("Initializing device registry...");
     initDeviceRegistry();
 
+    // Initialize database manager
+    Serial.println("Initializing database manager...");
+    dbManager.init();
+
     // Initialize command sender with retry mechanism
     Serial.println("Initializing command sender...");
     initCommandSender();
@@ -78,6 +94,10 @@ void setup() {
         Serial.println("WARNING: MQTT initialization failed");
         // Continue anyway - will retry in loop
     }
+
+    // Initialize web dashboard
+    Serial.println("Initializing web dashboard...");
+    initWebServer();
 
     // Initialize LoRa receiver
     Serial.println("Initializing LoRa receiver...");
@@ -122,11 +142,17 @@ void setup() {
 
 void loop() {
     // Main loop runs on Core 1
+    // Feed watchdog
+    esp_task_wdt_reset();
+    
     // Handle serial commands for testing
     handleSerialCommands();
 
     // Handle OTA updates
     ArduinoOTA.handle();
+
+    // Handle database operations
+    dbManager.loop();
 
     // Check WiFi connection
     static uint32_t lastWiFiCheck = 0;
@@ -148,6 +174,6 @@ void loop() {
     }
 #endif
 
-    // Small delay to prevent watchdog
-    delay(10);
+    // Yield to other tasks
+    vTaskDelay(pdMS_TO_TICKS(10));
 }

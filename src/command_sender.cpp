@@ -365,3 +365,52 @@ bool sendClearBaselineCommand(uint64_t sensorId) {
     Serial.println("\n📡 Sending CLEAR_BASELINE command");
     return sendCommand(sensorId, CMD_CLEAR_BASELINE, nullptr, 0);
 }
+
+/**
+ * Get number of queued commands for a specific sensor
+ */
+int getQueuedCommandCount(uint64_t sensorId) {
+    int count = 0;
+    for (int i = 0; i < queueSize; i++) {
+        if (commandQueue[i].sensorId == sensorId) {
+            count++;
+        }
+    }
+    return count;
+}
+
+/**
+ * Get JSON array of queued commands for a specific sensor
+ */
+String getQueuedCommandsJson(uint64_t sensorId) {
+    String result = "[";
+    bool first = true;
+    
+    for (int i = 0; i < queueSize; i++) {
+        if (commandQueue[i].sensorId == sensorId) {
+            if (!first) result += ",";
+            first = false;
+            
+            // Map command type to readable name
+            const char* cmdName = "unknown";
+            switch (commandQueue[i].cmdType) {
+                case CMD_SET_SLEEP: cmdName = "set_sleep"; break;
+                case CMD_SET_INTERVAL: cmdName = "set_interval"; break;
+                case CMD_RESTART: cmdName = "restart"; break;
+                case CMD_STATUS: cmdName = "status"; break;
+                case CMD_CALIBRATE: cmdName = "calibrate"; break;
+                case CMD_SET_BASELINE: cmdName = "set_baseline"; break;
+                case CMD_CLEAR_BASELINE: cmdName = "clear_baseline"; break;
+            }
+            
+            result += "{\"type\":\"";
+            result += cmdName;
+            result += "\",\"retries\":";
+            result += String(commandQueue[i].retryCount);
+            result += "}";
+        }
+    }
+    
+    result += "]";
+    return result;
+}

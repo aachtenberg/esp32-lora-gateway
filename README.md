@@ -425,7 +425,7 @@ Located at `/data/sensor_registry.json`:
 - Old packets (>50 newer packets ago) may be duplicated
 
 ### Display not working
-- Check I2C wiring (SDA=21, SCL=22)
+- Check I2C wiring (SDA=17, SCL=18, RST=21 on Heltec V3)
 - Run I2C scanner to verify 0x3C address
 - Disable OLED with `-D OLED_ENABLED=0` in platformio.ini if not needed
 
@@ -495,6 +495,13 @@ pio run -t upload --upload-port esp32-lora-gateway.local
 ## Related Projects
 
 - [esp32-lora-sensor](../esp32-lora-sensor/) - Sensor node with BME280
+
+## Shared Components
+
+Both the sensor and gateway share:
+- **Protocol library**: `lib/LoRaProtocol/lora_protocol.h` - Binary packet format definitions
+- **LoRa configuration**: Must match exactly (frequency, spreading factor, bandwidth, sync word)
+- **Hardware**: Heltec WiFi LoRa 32 V3 (ESP32-S3 with built-in SX1262)
 
 ## License
 

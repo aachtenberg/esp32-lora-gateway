@@ -1,0 +1,26 @@
+# Standalone deployment example
+# Production deployment is integrated into main ~/docker/docker-compose.yml
+# with network=monitoring, db_host=sre-postgres, password=${SRE_POSTGRES_PASSWORD}
+
+version: '3.8'
+
+services:
+  esp32-lora-api:
+    build: .
+    container_name: esp32-lora-api
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - DB_HOST=192.168.0.167
+      - DB_PORT=5432
+      - DB_USER=sre_agent
+      - DB_PASSWORD=3KNXAdSdHxtqzA4mhOjz5nJRoPuxM9yjEIn/05jeKRk=
+      - DB_NAME=iot_sensors
+    networks:
+      - iot_network
+
+networks:
+  iot_network:
+    external: true

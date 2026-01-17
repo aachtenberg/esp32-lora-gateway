@@ -7,6 +7,7 @@
 #include <PubSubClient.h>
 #include <WiFi.h>
 #include <ArduinoJson.h>
+#include <esp_task_wdt.h>
 
 #ifdef OLED_ENABLED
 #include "display_manager.h"
@@ -66,6 +67,9 @@ bool initMqttBridge() {
 void mqttTask(void* parameter) {
     Serial.println("[MQTT Task] Started on Core 1");
     
+    // Subscribe this task to the watchdog
+    esp_task_wdt_add(NULL);
+    
     // Wait for packet queue to be initialized
     QueueHandle_t packetQueue = NULL;
     while (packetQueue == NULL) {
@@ -73,12 +77,16 @@ void mqttTask(void* parameter) {
         if (packetQueue == NULL) {
             Serial.println("[MQTT Task] Waiting for packet queue...");
             vTaskDelay(pdMS_TO_TICKS(1000));
+            esp_task_wdt_reset();  // Feed watchdog while waiting
         }
     }
     
     ReceivedPacket packet;
     
     while (true) {
+        // Feed watchdog at start of loop
+        esp_task_wdt_reset();
+        
         // Maintain MQTT connection
         if (!mqttClient.connected()) {
             uint32_t now = millis();
@@ -95,9 +103,19 @@ void mqttTask(void* parameter) {
         
         // Check for packets from LoRa RX task
         if (xQueueReceive(packetQueue, &packet, pdMS_TO_TICKS(100)) == pdTRUE) {
-            Serial.printf("\n[MQTT] Processing packet from device 0x%016llX\n", packet.header.deviceId);
+            uint32_t packetReceivedMs = millis();
+            Serial.printf("\n[MQTT] Processing packet from device 0x%016llX (received at +%lums)\n", 
+                         packet.header.deviceId, packetReceivedMs);
+            
+            // Wait for sensor to be ready to receive commands
+            // Sensor needs ~2 seconds after TX: display operations + RX setup
+            Serial.println("⏱️  Waiting 3 seconds for sensor to enter RX mode...");
+            vTaskDelay(pdMS_TO_TICKS(3000));
             
             // Retry any queued commands for this sensor (it's now in RX window)
+            uint32_t cmdSendMs = millis();
+            Serial.printf("⏱️  Sending commands at +%lums (%lums after packet received)\n", 
+                         cmdSendMs, cmdSendMs - packetReceivedMs);
             retryCommandsForSensor(packet.header.deviceId);
             
             // Route packet based on message type
@@ -223,6 +241,9 @@ void publishStatus(const ReceivedPacket* packet) {
             updateDeviceLocation(packet->header.deviceId, sensorLocation);
         }
     }
+    
+    // Update device config values in registry
+    updateDeviceConfig(packet->header.deviceId, status->sensorIntervalSec, status->deepSleepSec);
     
     // Get device name and ID (may have just been updated)
     String deviceName = getDeviceName(packet->header.deviceId);

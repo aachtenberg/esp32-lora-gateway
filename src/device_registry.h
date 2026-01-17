@@ -15,7 +15,12 @@ struct DeviceInfo {
     uint16_t lastSequence;    // Last sequence number
     uint16_t sequenceBuffer[50];  // Deduplication buffer
     uint8_t bufferIndex;      // Circular buffer index
+    uint16_t sensorInterval;  // Sensor reading interval (seconds)
+    uint16_t deepSleepSec;    // Deep sleep duration (seconds)
 };
+
+// Thread-safe access functions
+// NOTE: For web server, use getDeviceRegistrySnapshot() to avoid holding mutex too long
 
 // Initialize device registry
 void initDeviceRegistry();
@@ -44,6 +49,9 @@ void updateDeviceName(uint64_t deviceId, const String& name);
 // Update device location in registry
 void updateDeviceLocation(uint64_t deviceId, const String& location);
 
+// Update device config (sensor interval and deep sleep)
+void updateDeviceConfig(uint64_t deviceId, uint16_t sensorInterval, uint16_t deepSleep);
+
 // Get device info by ID
 DeviceInfo* getDeviceInfo(uint64_t deviceId);
 
@@ -55,5 +63,8 @@ bool saveRegistry();
 
 // Load registry from SPIFFS
 bool loadRegistry();
+
+// Get thread-safe snapshot of all devices (for web server)
+String getDeviceRegistrySnapshot();
 
 #endif // DEVICE_REGISTRY_H
