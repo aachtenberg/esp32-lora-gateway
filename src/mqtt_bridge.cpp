@@ -347,7 +347,18 @@ void publishEvent(const ReceivedPacket* packet) {
     doc["device_name"] = deviceName;
     doc["location"] = deviceLocation;
     doc["event_type"] = event->eventType;
-    doc["severity"] = event->severity;  // 0=info, 1=warning, 2=error, 3=critical
+    
+    // Convert severity to string for Telegraf/InfluxDB compatibility
+    const char* severityStr;
+    switch (event->severity) {
+        case 0: severityStr = "info"; break;
+        case 1: severityStr = "warning"; break;
+        case 2: severityStr = "error"; break;
+        case 3: severityStr = "critical"; break;
+        default: severityStr = "unknown"; break;
+    }
+    doc["severity"] = severityStr;
+    
     doc["message"] = message;
     doc["timestamp"] = packet->timestamp;
     
