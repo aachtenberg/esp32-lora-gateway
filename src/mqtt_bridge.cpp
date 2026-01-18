@@ -351,10 +351,10 @@ void publishEvent(const ReceivedPacket* packet) {
     // Convert severity to string for Telegraf/InfluxDB compatibility
     const char* severityStr;
     switch (event->severity) {
-        case 0: severityStr = "info"; break;
-        case 1: severityStr = "warning"; break;
-        case 2: severityStr = "error"; break;
-        case 3: severityStr = "critical"; break;
+        case SEVERITY_INFO: severityStr = "info"; break;
+        case SEVERITY_WARNING: severityStr = "warning"; break;
+        case SEVERITY_ERROR: severityStr = "error"; break;
+        case SEVERITY_CRITICAL: severityStr = "critical"; break;
         default: severityStr = "unknown"; break;
     }
     doc["severity"] = severityStr;
