@@ -663,11 +663,15 @@ void initWebServer() {
             // Map action to command
             bool success = false;
             if (strcmp(action, "set_interval") == 0) {
-                uint16_t value = doc["value"] || 90;
+                uint16_t value = doc["value"].as<uint16_t>();
+                if (value == 0) value = 90;  // Default if missing
+                Serial.printf("[WEB] set_interval: value=%u\n", value);
                 success = queueCommand(deviceId, CMD_SET_INTERVAL, (uint8_t*)&value, sizeof(value));
             }
             else if (strcmp(action, "set_sleep") == 0) {
-                uint16_t value = doc["value"] || 90;
+                uint16_t value = doc["value"].as<uint16_t>();
+                if (value == 0) value = 90;  // Default if missing
+                Serial.printf("[WEB] set_sleep: value=%u\n", value);
                 success = queueCommand(deviceId, CMD_SET_SLEEP, (uint8_t*)&value, sizeof(value));
             }
             else if (strcmp(action, "calibrate") == 0) {
