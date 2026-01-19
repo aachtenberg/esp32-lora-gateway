@@ -145,12 +145,18 @@ void mqttTask(void* parameter) {
 
 /**
  * Detect sensor type from readings payload
- * DS18B20 sensors send zero for humidity and pressure
+ * - DS18B20: temp only (humidity=0, pressure=0)
+ * - DHT22: temp + humidity (pressure=0)
+ * - BME280: temp + humidity + pressure
  */
 static const char* detectSensorType(const ReadingsPayload* readings) {
     // DS18B20 temperature-only sensor: no humidity or pressure data
     if (readings->humidity == 0 && readings->pressure == 0) {
         return "DS18B20";
+    }
+    // DHT22 sensor: has humidity but no pressure/altitude
+    if (readings->pressure == 0) {
+        return "DHT22";
     }
     // BME280 environmental sensor: has all readings
     return "BME280";
