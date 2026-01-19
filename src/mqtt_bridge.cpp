@@ -145,15 +145,27 @@ void mqttTask(void* parameter) {
 
 /**
  * Detect sensor type from readings payload
- * DS18B20 sensors send zero for humidity and pressure
+ * - BME280: temp + humidity + pressure (pressure != 0)
+ * - DHT22: temp + humidity (pressure == 0, humidity != 0)
+ * - DS18B20: temp only (humidity == 0, pressure == 0)
+ * 
+ * Note: Detection checks pressure first (most reliable), then humidity.
+ * Edge case: DHT22 reporting 0% humidity is extremely rare but would be
+ * classified as DS18B20. This is acceptable since 0% RH requires completely
+ * dry air and is unlikely in real-world conditions.
  */
 static const char* detectSensorType(const ReadingsPayload* readings) {
-    // DS18B20 temperature-only sensor: no humidity or pressure data
-    if (readings->humidity == 0 && readings->pressure == 0) {
-        return "DS18B20";
+    // BME280 environmental sensor: has pressure data (most reliable indicator)
+    if (readings->pressure != 0) {
+        return "BME280";
     }
-    // BME280 environmental sensor: has all readings
-    return "BME280";
+    // DHT22 sensor: has humidity but no pressure
+    if (readings->humidity != 0) {
+        return "DHT22";
+    }
+    // DS18B20 temperature-only sensor: no humidity or pressure data
+    // Note: Also catches DHT22 at exactly 0% RH (extremely rare)
+    return "DS18B20";
 }
 
 /**
