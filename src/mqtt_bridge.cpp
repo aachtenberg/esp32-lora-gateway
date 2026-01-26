@@ -218,6 +218,19 @@ void publishReadings(const ReceivedPacket* packet) {
     doc["battery_voltage"] = readings->batteryVoltage / 1000.0;
     doc["battery_percent"] = readings->batteryPercent;
 
+    // GPS data (if available - 0,0 means no fix)
+    if (readings->gpsLatitude != 0 || readings->gpsLongitude != 0) {
+        doc["gps_latitude"] = readings->gpsLatitude / 1000000.0;
+        doc["gps_longitude"] = readings->gpsLongitude / 1000000.0;
+        doc["gps_altitude"] = readings->gpsAltitude;
+        doc["gps_satellites"] = readings->gpsSatellites;
+        doc["gps_hdop"] = readings->gpsHdop / 10.0;
+    } else if (readings->gpsSatellites > 0) {
+        // No fix yet but GPS is active
+        doc["gps_satellites"] = readings->gpsSatellites;
+        doc["gps_hdop"] = readings->gpsHdop / 10.0;
+    }
+
     // LoRa metadata
     doc["rssi"] = packet->rssi;
     doc["snr"] = packet->snr;

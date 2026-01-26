@@ -663,12 +663,38 @@ void initWebServer() {
             // Map action to command
             bool success = false;
             if (strcmp(action, "set_interval") == 0) {
-                uint16_t value = doc["value"] || 90;
-                success = queueCommand(deviceId, CMD_SET_INTERVAL, (uint8_t*)&value, sizeof(value));
+                uint16_t value = doc["value"].as<uint16_t>();
+                if (value == 0) value = 90;  // Default if missing
+                
+                // Validate interval range: must be between 5 and 3600 seconds
+                if (value < 5 || value > 3600) {
+                    request->send(400, "application/json", "{\"success\":false,\"error\":\"Interval must be between 5 and 3600 seconds\"}");
+                    return;
+                }
+                
+                Serial.printf("[WEB] set_interval: value=%u\n", value);
+                
+                // Format as ASCII decimal string (matches MQTT handler and command_sender)
+                char valueStr[8];
+                snprintf(valueStr, sizeof(valueStr), "%u", value);
+                success = queueCommand(deviceId, CMD_SET_INTERVAL, (uint8_t*)valueStr, strlen(valueStr));
             }
             else if (strcmp(action, "set_sleep") == 0) {
-                uint16_t value = doc["value"] || 90;
-                success = queueCommand(deviceId, CMD_SET_SLEEP, (uint8_t*)&value, sizeof(value));
+                uint16_t value = doc["value"].as<uint16_t>();
+                if (value == 0) value = 90;  // Default if missing
+                
+                // Validate sleep value: maximum 3600 seconds
+                if (value > 3600) {
+                    request->send(400, "application/json", "{\"success\":false,\"error\":\"Invalid sleep value (max 3600 seconds)\"}");
+                    return;
+                }
+                
+                Serial.printf("[WEB] set_sleep: value=%u\n", value);
+                
+                // Format as ASCII decimal string (matches MQTT handler and command_sender)
+                char valueStr[8];
+                snprintf(valueStr, sizeof(valueStr), "%u", value);
+                success = queueCommand(deviceId, CMD_SET_SLEEP, (uint8_t*)valueStr, strlen(valueStr));
             }
             else if (strcmp(action, "calibrate") == 0) {
                 success = queueCommand(deviceId, CMD_CALIBRATE, nullptr, 0);
