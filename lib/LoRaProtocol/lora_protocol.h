@@ -49,7 +49,7 @@ struct LoRaPacketHeader {
 // Payload Structures
 // ====================================================================
 
-// Readings payload (37 bytes) - BME280 sensor data
+// Readings payload (50 bytes) - BME280 sensor data + GPS
 struct ReadingsPayload {
     uint32_t timestamp;       // Unix timestamp (seconds) or uptime
     int16_t  temperature;     // Temperature * 100 (e.g., 2531 = 25.31°C)
@@ -60,6 +60,12 @@ struct ReadingsPayload {
     uint8_t  batteryPercent;  // 0-100%
     int32_t  pressureChange;  // Change from baseline (Pa)
     uint8_t  pressureTrend;   // 0=falling, 1=steady, 2=rising
+    // GPS data (13 bytes)
+    int32_t  gpsLatitude;     // Latitude * 1000000 (e.g., 52123456 = 52.123456°)
+    int32_t  gpsLongitude;    // Longitude * 1000000
+    int16_t  gpsAltitude;     // GPS altitude in meters
+    uint8_t  gpsSatellites;   // Number of satellites
+    uint16_t gpsHdop;         // HDOP * 10 (e.g., 15 = 1.5)
 } __attribute__((packed));
 
 // Status payload (88 bytes) - Device health metrics
