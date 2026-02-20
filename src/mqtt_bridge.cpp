@@ -4,6 +4,7 @@
 #include "device_config.h"
 #include "secrets.h"
 #include "command_sender.h"
+#include "database_manager.h"
 #include <PubSubClient.h>
 #include <WiFi.h>
 #include <ArduinoJson.h>
@@ -399,6 +400,9 @@ void publishEvent(const ReceivedPacket* packet) {
     } else {
         Serial.printf("❌ Failed to publish event\n");
     }
+
+    // Persist event to PostgreSQL via API
+    dbManager.writeEvent(packet->header.deviceId, event->eventType, event->severity, String(message));
 }
 
 /**
@@ -487,7 +491,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         return;
     }
     
-    // Publish result
+    // Publish result and persist to database
     if (success) {
         Serial.println("✅ Command queued for retry on sensor activity");
         // Optionally publish ACK back to MQTT
@@ -498,8 +502,12 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
                  "{\"device_id\":\"%s\",\"action\":\"%s\",\"status\":\"queued\"}", 
                  targetDeviceStr, action);
         mqttClient.publish(ackTopic, ackPayload);
+
+        // Persist command to PostgreSQL via API
+        dbManager.writeCommand(targetDevice, 0, String(action), "queued");
     } else {
         Serial.println("❌ Command queueing failed");
+        dbManager.writeCommand(targetDevice, 0, String(action), "failed");
     }
 }
 

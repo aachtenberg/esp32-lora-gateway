@@ -7,8 +7,8 @@
 // Maximum queued commands
 #define MAX_QUEUED_COMMANDS 10
 
-// Command expiration time (5 minutes)
-#define COMMAND_EXPIRATION_MS (5 * 60 * 1000)
+// Command expiration time (30 minutes - long enough for deep-sleeping sensors)
+#define COMMAND_EXPIRATION_MS (30 * 60 * 1000)
 
 /**
  * Initialize command sender with retry mechanism
@@ -111,6 +111,16 @@ bool sendSetBaselineCommand(uint64_t sensorId, float baselineHpa);
  * @return true if transmission successful
  */
 bool sendClearBaselineCommand(uint64_t sensorId);
+
+/**
+ * Send CMD_SET_NAME command to sensor
+ * Set the device's friendly name (max 31 characters)
+ *
+ * @param sensorId: 64-bit device ID of target sensor
+ * @param name: New device name (will be truncated to 31 chars)
+ * @return true if transmission successful
+ */
+bool sendSetNameCommand(uint64_t sensorId, const char* name);
 
 /**
  * Get number of queued commands for a specific sensor

@@ -98,6 +98,7 @@ enum CommandType {
     CMD_SET_INTERVAL    = 0x07,  // Set sensor read interval
     CMD_OTA_START       = 0x08,  // Start OTA update (future)
     CMD_TIME_SYNC       = 0x09,  // Time synchronization
+    CMD_SET_NAME        = 0x0A,  // Set device name (string, max 31 chars)
 };
 
 // Event types

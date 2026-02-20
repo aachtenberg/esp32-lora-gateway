@@ -395,6 +395,34 @@ int getDeviceCount() {
 }
 
 /**
+ * Remove device from registry by ID
+ * Shifts remaining devices down and saves to LittleFS
+ */
+bool removeDevice(uint64_t deviceId) {
+    LOCK_REGISTRY();
+
+    for (int i = 0; i < deviceCount; i++) {
+        if (devices[i].deviceId == deviceId) {
+            String name = devices[i].deviceName;
+            // Shift remaining devices down
+            for (int j = i; j < deviceCount - 1; j++) {
+                devices[j] = devices[j + 1];
+            }
+            deviceCount--;
+            UNLOCK_REGISTRY();
+
+            Serial.printf("[Registry] Removed device: %s (0x%016llX)\n", name.c_str(), deviceId);
+            saveRegistry();
+            return true;
+        }
+    }
+
+    UNLOCK_REGISTRY();
+    Serial.printf("[Registry] Device 0x%016llX not found for removal\n", deviceId);
+    return false;
+}
+
+/**
  * Save registry to LittleFS as JSON
  */
 bool saveRegistry() {

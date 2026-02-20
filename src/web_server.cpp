@@ -10,8 +10,14 @@
 #include "lora_protocol.h"
 #include <ESPAsyncWebServer.h>
 #include <ArduinoJson.h>
+#include <HTTPClient.h>
 
 AsyncWebServer server(80);
+
+// API service URL for proxying requests
+#ifndef DB_API_URL
+#define DB_API_URL "http://192.168.0.167:3000/api"
+#endif
 
 // HTML Dashboard (embedded)
 const char index_html[] PROGMEM = R"rawliteral(
@@ -630,11 +636,29 @@ void initWebServer() {
         request->send(200, "application/json", json);
     });
     
-    // API: Get recent events from database
+    // API: Get recent events from database (proxied from Go API service)
     server.on("/api/events", HTTP_GET, [](AsyncWebServerRequest *request){
-        // For now, return empty array - ESP32 doesn't query database
-        // Events are stored in PostgreSQL and can be viewed via API service directly
-        request->send(200, "application/json", "[]");
+        // Fetch limit from query param (default 20)
+        String limit = "20";
+        if (request->hasParam("limit")) {
+            limit = request->getParam("limit")->value();
+        }
+
+        // Proxy request to Go API service
+        HTTPClient http;
+        String url = String(DB_API_URL) + "/events?limit=" + limit;
+        http.begin(url);
+        http.setTimeout(3000);
+        int httpCode = http.GET();
+
+        if (httpCode == 200) {
+            String payload = http.getString();
+            request->send(200, "application/json", payload);
+        } else {
+            Serial.printf("[WEB] Events fetch failed: HTTP %d\n", httpCode);
+            request->send(200, "application/json", "[]");
+        }
+        http.end();
     });
     
     // API: Send command to sensor
@@ -708,6 +732,17 @@ void initWebServer() {
             else if (strcmp(action, "status") == 0) {
                 success = queueCommand(deviceId, CMD_STATUS, nullptr, 0);
             }
+            else if (strcmp(action, "set_name") == 0) {
+                const char* name = doc["value"].as<const char*>();
+                if (!name || strlen(name) == 0) {
+                    request->send(400, "application/json", "{\"success\":false,\"error\":\"Name cannot be empty\"}");
+                    return;
+                }
+                size_t nameLen = strlen(name);
+                if (nameLen > 31) nameLen = 31;  // Truncate to max length
+                Serial.printf("[WEB] set_name: value=%s\n", name);
+                success = queueCommand(deviceId, CMD_SET_NAME, (uint8_t*)name, nameLen);
+            }
             else {
                 request->send(400, "application/json", "{\"success\":false,\"error\":\"Unknown action\"}");
                 return;
@@ -716,12 +751,33 @@ void initWebServer() {
             if (success) {
                 request->send(200, "application/json", "{\"success\":true}");
                 Serial.printf("[WEB] Command queued: %s for device 0x%016llX\n", action, deviceId);
+                // Persist command to PostgreSQL via API
+                dbManager.writeCommand(deviceId, 0, String(action), "queued");
             } else {
                 request->send(500, "application/json", "{\"success\":false,\"error\":\"Failed to queue command\"}");
+                dbManager.writeCommand(deviceId, 0, String(action), "failed");
             }
         }
     );
     
+    // API: Delete a device from the registry
+    server.on("/api/device", HTTP_DELETE, [](AsyncWebServerRequest *request){
+        if (!request->hasParam("id")) {
+            request->send(400, "application/json", "{\"success\":false,\"error\":\"Missing id parameter\"}");
+            return;
+        }
+
+        String deviceIdStr = request->getParam("id")->value();
+        uint64_t deviceId = strtoull(deviceIdStr.c_str(), nullptr, 16);
+
+        if (removeDevice(deviceId)) {
+            request->send(200, "application/json", "{\"success\":true}");
+            Serial.printf("[WEB] Removed device 0x%016llX\n", deviceId);
+        } else {
+            request->send(404, "application/json", "{\"success\":false,\"error\":\"Device not found\"}");
+        }
+    });
+
     // Start server
     server.begin();
     Serial.println("✅ Web dashboard started on port 80");

@@ -367,6 +367,25 @@ bool sendClearBaselineCommand(uint64_t sensorId) {
 }
 
 /**
+ * Send CMD_SET_NAME command to sensor
+ */
+bool sendSetNameCommand(uint64_t sensorId, const char* name) {
+    if (!name || strlen(name) == 0) {
+        Serial.println("❌ Invalid name: empty string");
+        return false;
+    }
+    
+    size_t nameLen = strlen(name);
+    if (nameLen > 31) {
+        Serial.printf("⚠️  Name truncated from %d to 31 chars\n", nameLen);
+        nameLen = 31;
+    }
+    
+    Serial.printf("\n📡 Sending SET_NAME command: %s\n", name);
+    return sendCommand(sensorId, CMD_SET_NAME, (uint8_t*)name, nameLen);
+}
+
+/**
  * Get number of queued commands for a specific sensor
  */
 int getQueuedCommandCount(uint64_t sensorId) {
@@ -401,6 +420,7 @@ String getQueuedCommandsJson(uint64_t sensorId) {
                 case CMD_CALIBRATE: cmdName = "calibrate"; break;
                 case CMD_SET_BASELINE: cmdName = "set_baseline"; break;
                 case CMD_CLEAR_BASELINE: cmdName = "clear_baseline"; break;
+                case CMD_SET_NAME: cmdName = "set_name"; break;
             }
             
             result += "{\"type\":\"";

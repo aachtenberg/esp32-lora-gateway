@@ -65,6 +65,9 @@ DeviceInfo* getDeviceInfo(uint64_t deviceId);
 // Get total device count
 int getDeviceCount();
 
+// Remove device from registry by ID
+bool removeDevice(uint64_t deviceId);
+
 // Save registry to SPIFFS
 bool saveRegistry();
 
