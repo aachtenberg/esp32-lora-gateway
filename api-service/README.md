@@ -160,8 +160,9 @@ Environment variables:
 - `GET /api/health` - Health check
 - `POST /api/devices` - Device updates (UPSERT)
 - `POST /api/packets` - Packet history (INSERT)
-- `GET /api/commands?limit=N` - Recent command history with device names (newest first)
-- `POST /api/commands` - Commands (INSERT; `parameters` must be a JSON string)
+- `GET /api/commands?limit=N` - Recent command history with device names, lifecycle timestamps and retry counts (newest first)
+- `POST /api/commands` - Commands (INSERT; `parameters` must be a JSON string); returns `{"id": N}`
+- `POST /api/commands/status` - Move the most recent open command for `device_id` + `command_type` to `sent`, `confirmed`, `timeout`, `superseded` or `failed` (optional `retry_count`, `error_message`); stamps `sent_at` / `confirmed_at`
 - `GET /api/events?limit=N` - Recent events with device names
 - `POST /api/events` - Events (INSERT)
 

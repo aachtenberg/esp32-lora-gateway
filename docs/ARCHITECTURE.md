@@ -208,7 +208,7 @@ CREATE TABLE commands (
     device_id BIGINT REFERENCES devices(device_id),
     command_type SMALLINT NOT NULL,
     parameters JSONB,
-    status VARCHAR(20) NOT NULL,  -- 'pending', 'sent', 'confirmed', 'failed', 'timeout'
+    status VARCHAR(20) NOT NULL,  -- 'queued', 'sent', 'confirmed', 'failed', 'timeout', 'superseded'
     created_at TIMESTAMP DEFAULT NOW(),
     sent_at TIMESTAMP,
     confirmed_at TIMESTAMP,
@@ -218,7 +218,7 @@ CREATE TABLE commands (
 
 CREATE INDEX idx_commands_device_status ON commands(device_id, status);
 CREATE INDEX idx_commands_pending ON commands(status, created_at) 
-    WHERE status = 'pending';
+    WHERE status IN ('queued', 'sent');
 
 -- Event Logs
 CREATE TABLE events (
@@ -296,6 +296,17 @@ build_flags =
 ```
 
 ### Graceful Degradation Logic
+
+> **As built (Oct 2026):** `DatabaseManager` is queue-only. Every `write*()`
+> call, from any task (LoRa RX, MQTT, async web server), appends to a
+> mutex-guarded `std::deque` and returns. `loop()` on the main task owns the
+> single `HTTPClient`, pops the head under the lock before each POST, drains
+> within a 4 s budget while feeding the watchdog, and pushes the entry back on
+> a retryable failure. 4xx responses drop the record; a 5xx is retried three
+> times then dropped; only a transport error marks the API disconnected.
+> Command lifecycle updates go to `POST /api/commands/status`. The sketch
+> below is the original design and keeps the synchronous "write if connected"
+> shape for reference.
 
 ```cpp
 class DatabaseManager {

@@ -44,12 +44,10 @@ build_flags =
 
 ### 3. Create REST API Service
 
-You need to create a simple Node.js/Python/Go service that:
-- Accepts POST requests to `/api/devices`, `/api/packets`, `/api/commands`, `/api/events`
-- Writes JSON payloads to PostgreSQL
-- Returns HTTP 200 on success
-
-See `docs/API_SPEC.md` for endpoint specifications (to be created).
+The Go service in `api-service/` does this. It runs as the `esp32-lora-api`
+Deployment in the `iot` namespace of the homelab k3s cluster (see
+`api-service/README.md` and `api-service/deploy.sh`). Endpoint details are in
+`docs/TELEGRAF_SPEC.md`.
 
 ### 4. Database Schema
 
@@ -143,14 +141,31 @@ Returns 200 if API is healthy
 ```
 
 ### POST /api/commands
+`parameters` is JSON text (JSONB column). Returns `{"id": N}`.
 ```json
 {
   "device_id": "12345678",
-  "command_type": 1,
-  "parameters": "90",
-  "status": "pending"
+  "command_type": 7,
+  "parameters": "{\"action\":\"set_interval\",\"value\":90}",
+  "status": "queued"
 }
 ```
+
+### POST /api/commands/status
+Moves the newest row for the device + command type from its expected prior
+status to a new one (`sent`, `timeout`, `superseded`, `failed` from `queued`;
+`confirmed` from `sent`). Optional `from`, `retry_count`, `error_message`.
+```json
+{
+  "device_id": "12345678",
+  "command_type": 7,
+  "status": "sent",
+  "retry_count": 1
+}
+```
+
+### GET /api/commands?limit=N, GET /api/events?limit=N
+Recent history joined with device names; the gateway proxies these to the dashboard.
 
 ### POST /api/events
 ```json
@@ -164,11 +179,11 @@ Returns 200 if API is healthy
 
 ## Performance Notes
 
-- HTTP requests are async (non-blocking)
-- Queue processes 10 writes per loop iteration
-- Each write has 5-second timeout
-- Failed writes increment `failedWrites` counter
-- Health check runs every 60 seconds
+- `write*()` calls never block: they append to a mutex-guarded queue from any task
+- The main loop drains the queue FIFO within a 4-second budget per pass, feeding the watchdog between posts
+- Each write has a 3-second timeout; 4xx drops the record, 5xx retries it 3 times, only a transport error marks the API disconnected
+- Failed writes increment `failedWrites` (shown on the dashboard with the queue depth)
+- Health check runs every 60 seconds when the queue is empty
 
 ## Files Modified
 

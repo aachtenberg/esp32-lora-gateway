@@ -267,8 +267,8 @@ const char index_html[] PROGMEM = R"rawliteral(
 
             <div class="section">
                 <div class="section-header">
-                    <h2>Command Log</h2>
-                    <div class="description">Commands this gateway accepted (queued) or rejected (failed), from the database. Delivery to the sensor is shown live in each card's Command Queue.</div>
+                    <h2>Command History</h2>
+                    <div class="description">queued → sent on the sensor's next RX window → confirmed when a later status report echoes the new sleep, interval or name, or a startup event follows a restart (any reboot within 15 min counts). Status and calibration commands stop at sent. Unsent commands time out after 30 min.</div>
                 </div>
                 <div id="commands" class="table-wrap"><div class="loading"><div class="spinner"></div></div></div>
             </div>
@@ -528,16 +528,21 @@ const char index_html[] PROGMEM = R"rawliteral(
             const el = document.getElementById('commands');
             fetch('/api/commands').then(r => { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); }).then(data => {
                 if (!data || data.length === 0) { el.innerHTML = '<p class="empty-note">No commands recorded yet</p>'; return; }
-                const statusCls = { queued: 'warn', sent: '', confirmed: '', failed: 'bad', timeout: 'bad' };
-                el.innerHTML = renderTable(['Time', 'Device', 'Command', 'Value', 'Status'], data.map(c => {
+                const statusCls = { queued: 'warn', sent: 'warn', confirmed: '', failed: 'bad', timeout: 'bad', superseded: 'muted' };
+                el.innerHTML = renderTable(['Queued', 'Device', 'Command', 'Value', 'Status', 'Tries', 'Sent', 'Confirmed'], data.map(c => {
                     const p = c.parameters || {};
                     const name = p.action || CMD_NAMES[c.command_type] || ('type ' + c.command_type);
+                    const t = (v) => v ? esc(new Date(v).toLocaleTimeString()) : '—';
+                    const title = c.error_message ? ` title="${attr(c.error_message)}"` : '';
                     return `<tr>
                     <td class="time">${esc(new Date(c.created_at).toLocaleString())}</td>
                     <td>${esc(c.device_name)}</td>
                     <td class="mono">${esc(name)}</td>
                     <td class="mono">${p.value !== undefined ? esc(p.value) : '—'}</td>
-                    <td><span class="badge ${statusCls[c.status] ?? 'muted'}">${esc(String(c.status).toUpperCase())}</span></td></tr>`;
+                    <td><span class="badge ${statusCls[c.status] ?? 'muted'}"${title}>${esc(String(c.status).toUpperCase())}</span></td>
+                    <td>${esc(c.retry_count ?? 0)}</td>
+                    <td class="time">${t(c.sent_at)}</td>
+                    <td class="time">${t(c.confirmed_at)}</td></tr>`;
                 }));
             }).catch(() => unavailable(el, 'Command history'));
         }

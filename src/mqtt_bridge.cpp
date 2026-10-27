@@ -306,6 +306,9 @@ void publishStatus(const ReceivedPacket* packet) {
     // Update device config values and health snapshot in registry
     updateDeviceConfig(packet->header.deviceId, status->sensorIntervalSec, status->deepSleepSec);
     updateDeviceHealth(packet->header.deviceId, status);
+
+    // A status report after a send is the proof that status/set_* commands took effect
+    confirmCommandsFromStatus(packet->header.deviceId, status, packet->timestamp);
     
     // Get device name and ID (may have just been updated)
     String deviceName = getDeviceName(packet->header.deviceId);
@@ -359,9 +362,10 @@ void publishEvent(const ReceivedPacket* packet) {
     EventPayload* event = (EventPayload*)packet->payload;
     
     // Clear deduplication buffer on device restart
-    if (event->eventType == 0x01) {  // EVENT_STARTUP
+    if (event->eventType == EVENT_STARTUP) {
         clearDuplicationBuffer(packet->header.deviceId);
     }
+    confirmCommandsFromEvent(packet->header.deviceId, event->eventType, packet->timestamp);
     
     // Get device name and ID
     String deviceName = getDeviceName(packet->header.deviceId);

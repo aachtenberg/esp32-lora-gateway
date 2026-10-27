@@ -1,4 +1,5 @@
 #include "database_manager.h"
+#include <esp_task_wdt.h>
 
 DatabaseManager dbManager;
 
@@ -9,8 +10,18 @@ DatabaseManager dbManager;
 #define DB_API_URL "http://192.168.0.167:3000/api"
 #endif
 
-DatabaseManager::DatabaseManager() 
+#define LOCK_WRITES()   do { if (queueMutex) xSemaphoreTake(queueMutex, portMAX_DELAY); } while (0)
+#define UNLOCK_WRITES() do { if (queueMutex) xSemaphoreGive(queueMutex); } while (0)
+
+static void formatDeviceIdDecimal(uint64_t deviceId, char* out, size_t len) {
+    // Decimal string: avoids truncation on 32-bit and matches the BIGINT column
+    snprintf(out, len, "%llu", (unsigned long long)deviceId);
+}
+
+DatabaseManager::DatabaseManager()
     : status(DB_DISCONNECTED)
+    , queueMutex(NULL)
+    , headFailures(0)
     , lastReconnectAttempt(0)
     , failedWrites(0)
     , reconnectAttempts(0)
@@ -22,6 +33,9 @@ DatabaseManager::~DatabaseManager() {
 }
 
 void DatabaseManager::init() {
+    if (queueMutex == NULL) {
+        queueMutex = xSemaphoreCreateMutex();
+    }
 #if DB_API_ENABLED
     Serial.println("[DB] Initializing database manager (REST API mode)");
     Serial.printf("[DB] API URL: %s\n", apiBaseUrl.c_str());
@@ -45,69 +59,114 @@ void DatabaseManager::loop() {
 #endif
 }
 
+size_t DatabaseManager::getQueueDepth() {
+    LOCK_WRITES();
+    size_t depth = writeQueue.size();
+    UNLOCK_WRITES();
+    return depth;
+}
+
 void DatabaseManager::attemptConnection() {
     lastReconnectAttempt = millis();
     reconnectAttempts++;
-    
+
     Serial.printf("[DB] Connection attempt %d...\n", reconnectAttempts);
-    
+
     // Simple health check to API
     http.begin(apiBaseUrl + "/health");
-    http.setTimeout(5000);
+    http.setTimeout(HTTP_TIMEOUT_MS);
     int httpCode = http.GET();
     http.end();
-    
+
     if (httpCode == 200) {
         Serial.println("✅ Database API connected");
         status = DB_CONNECTED;
         reconnectAttempts = 0;
-        
-        // Process any queued writes
-        Serial.printf("[DB] Processing %d queued writes\n", writeQueue.size());
+        Serial.printf("[DB] Processing %d queued writes\n", getQueueDepth());
     } else {
         Serial.printf("⚠️  Database API unavailable (HTTP %d), continuing without persistence\n", httpCode);
         status = DB_DISCONNECTED;
     }
 }
 
+/**
+ * Drain queued writes in FIFO order. The head entry is popped under the lock
+ * before the POST so no other task can touch it (queueWrite() drops the
+ * oldest entry on overflow, which must never be the record in flight). If the
+ * POST does not succeed and the entry should be retried, it is pushed back to
+ * the front. Bounded by DRAIN_BUDGET_MS per pass and feeds the watchdog
+ * between posts so a slow API cannot starve the main loop.
+ *
+ * Outcomes: OK and REJECTED (4xx) finish the entry. SERVER_ERROR (5xx) retries
+ * it, dropping it after MAX_HEAD_FAILURES so one bad record cannot block
+ * everything behind it; the API answered, so we stay connected. Only
+ * UNREACHABLE (no HTTP response) marks the API disconnected.
+ */
 void DatabaseManager::processWriteQueue() {
-    if (writeQueue.empty() || status != DB_CONNECTED) {
-        return;
-    }
-    
-    // Process up to 10 writes per loop iteration to avoid blocking
+    uint32_t started = millis();
     int processed = 0;
-    while (!writeQueue.empty() && processed < 10 && status == DB_CONNECTED) {
-        PendingWrite& write = writeQueue.front();
-        
-        if (postJson(write.endpoint, write.doc)) {
-            writeQueue.pop();
-            processed++;
-        } else {
-            // Connection likely failed
-            Serial.println("⚠️  Database write failed, marking disconnected");
-            status = DB_DISCONNECTED;
-            break;
+
+    while (status == DB_CONNECTED && millis() - started < DRAIN_BUDGET_MS) {
+        PendingWrite write;
+        LOCK_WRITES();
+        bool have = !writeQueue.empty();
+        if (have) {
+            write = writeQueue.front();
+            writeQueue.pop_front();
         }
+        UNLOCK_WRITES();
+        if (!have) break;
+
+        esp_task_wdt_reset();
+        PostResult result = postJson(write.endpoint, write.doc);
+
+        if (result == POST_OK || result == POST_REJECTED) {
+            headFailures = 0;
+            if (result == POST_OK) processed++;
+            continue;
+        }
+
+        if (result == POST_SERVER_ERROR) {
+            headFailures++;
+            if (headFailures >= MAX_HEAD_FAILURES) {
+                Serial.printf("⚠️  Dropping %s after %d server errors\n", write.endpoint.c_str(), headFailures);
+                headFailures = 0;
+                continue;
+            }
+        } else {
+            Serial.println("⚠️  Database API unreachable, marking disconnected");
+            status = DB_DISCONNECTED;
+        }
+
+        // Retry this entry later: put it back at the head
+        LOCK_WRITES();
+        writeQueue.push_front(write);
+        UNLOCK_WRITES();
+        break;
     }
-    
+    esp_task_wdt_reset();
+
     if (processed > 0) {
-        Serial.printf("[DB] Processed %d queued writes, %d remaining\n", 
-                     processed, writeQueue.size());
+        size_t remaining = getQueueDepth();
+        if (remaining > 0) {
+            Serial.printf("[DB] Processed %d queued writes, %d remaining\n", processed, remaining);
+        }
     }
 }
 
 void DatabaseManager::checkConnectionHealth() {
-    // Simple health check every minute
+    // Simple health check every minute, only when there is nothing to drain
+    // (a successful post is a better health signal than an extra request)
     static uint32_t lastCheck = 0;
     if (millis() - lastCheck > 60000) {
         lastCheck = millis();
-        
+        if (getQueueDepth() > 0) return;
+
         http.begin(apiBaseUrl + "/health");
         http.setTimeout(2000);
         int httpCode = http.GET();
         http.end();
-        
+
         if (httpCode != 200) {
             Serial.println("⚠️  Database connection lost");
             status = DB_DISCONNECTED;
@@ -115,44 +174,57 @@ void DatabaseManager::checkConnectionHealth() {
     }
 }
 
-bool DatabaseManager::postJson(const String& endpoint, const JsonDocument& doc) {
-    if (status != DB_CONNECTED) {
-        return false;
-    }
-    
+DatabaseManager::PostResult DatabaseManager::postJson(const String& endpoint, const JsonDocument& doc) {
     String url = apiBaseUrl + endpoint;
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
-    http.setTimeout(5000);
-    
+    http.setTimeout(HTTP_TIMEOUT_MS);
+
     String jsonStr;
     serializeJson(doc, jsonStr);
-    
+
     int httpCode = http.POST(jsonStr);
     http.end();
-    
+
     if (httpCode >= 200 && httpCode < 300) {
-        return true;
-    } else {
-        Serial.printf("⚠️  POST %s failed: HTTP %d\n", endpoint.c_str(), httpCode);
-        failedWrites++;
-        return false;
+        return POST_OK;
     }
+
+    failedWrites++;
+
+    // 4xx: the API rejected this record; retrying would never succeed.
+    if (httpCode >= 400 && httpCode < 500) {
+        Serial.printf("⚠️  POST %s rejected: HTTP %d (dropping record)\n", endpoint.c_str(), httpCode);
+        return POST_REJECTED;
+    }
+
+    // Negative codes are HTTPClient transport errors (no response at all).
+    if (httpCode < 0) {
+        Serial.printf("⚠️  POST %s unreachable: %s\n", endpoint.c_str(), HTTPClient::errorToString(httpCode).c_str());
+        return POST_UNREACHABLE;
+    }
+
+    Serial.printf("⚠️  POST %s failed: HTTP %d\n", endpoint.c_str(), httpCode);
+    return POST_SERVER_ERROR;
 }
 
-void DatabaseManager::queueWrite(const String& endpoint, const JsonDocument& doc) {
-    if (writeQueue.size() >= MAX_QUEUE_SIZE) {
-        // Drop oldest to prevent memory overflow
-        Serial.println("⚠️  Write queue full, dropping oldest");
-        writeQueue.pop();
-        failedWrites++;
-    }
-    
+bool DatabaseManager::queueWrite(const String& endpoint, const JsonDocument& doc) {
     PendingWrite write;
     write.endpoint = endpoint;
     write.doc = doc;
     write.timestamp = millis();
-    writeQueue.push(write);
+
+    LOCK_WRITES();
+    if (writeQueue.size() >= MAX_QUEUE_SIZE) {
+        // Drop the oldest queued record. The record in flight was already
+        // popped by processWriteQueue(), so it is never the one dropped.
+        writeQueue.pop_front();
+        failedWrites++;
+        Serial.println("⚠️  Write queue full, dropping oldest");
+    }
+    writeQueue.push_back(write);
+    UNLOCK_WRITES();
+    return true;
 }
 
 bool DatabaseManager::writeDevice(uint64_t deviceId, const String& name, const String& location,
@@ -163,9 +235,8 @@ bool DatabaseManager::writeDevice(uint64_t deviceId, const String& name, const S
 #endif
 
     JsonDocument doc;
-    // Convert uint64_t to string to avoid truncation on 32-bit systems
     char deviceIdStr[32];
-    snprintf(deviceIdStr, sizeof(deviceIdStr), "%llu", (unsigned long long)deviceId);
+    formatDeviceIdDecimal(deviceId, deviceIdStr, sizeof(deviceIdStr));
     doc["device_id"] = deviceIdStr;
     doc["name"] = name;
     doc["location"] = location;
@@ -176,13 +247,8 @@ bool DatabaseManager::writeDevice(uint64_t deviceId, const String& name, const S
     doc["last_sequence"] = lastSequence;
     doc["sensor_interval"] = sensorInterval;
     doc["deep_sleep_sec"] = deepSleep;
-    
-    if (status == DB_CONNECTED) {
-        return postJson("/devices", doc);
-    } else {
-        queueWrite("/devices", doc);
-        return false;
-    }
+
+    return queueWrite("/devices", doc);
 }
 
 bool DatabaseManager::writePacket(uint64_t deviceId, const String& gatewayId, uint8_t msgType,
@@ -198,22 +264,35 @@ bool DatabaseManager::writeCommand(uint64_t deviceId, uint8_t commandType, const
 #if !DB_API_ENABLED
     return false;
 #endif
-    
+
     JsonDocument doc;
-    // Convert uint64_t to string to avoid truncation on 32-bit systems
     char deviceIdStr[32];
-    snprintf(deviceIdStr, sizeof(deviceIdStr), "%llu", (unsigned long long)deviceId);
+    formatDeviceIdDecimal(deviceId, deviceIdStr, sizeof(deviceIdStr));
     doc["device_id"] = deviceIdStr;
     doc["command_type"] = commandType;
     doc["parameters"] = params;
     doc["status"] = statusStr;
-    
-    if (status == DB_CONNECTED) {
-        return postJson("/commands", doc);
-    } else {
-        queueWrite("/commands", doc);
-        return false;
-    }
+
+    return queueWrite("/commands", doc);
+}
+
+bool DatabaseManager::writeCommandStatus(uint64_t deviceId, uint8_t commandType, const char* statusStr,
+                                         int retryCount, const String& errorMessage, const char* fromStatus) {
+#if !DB_API_ENABLED
+    return false;
+#endif
+
+    JsonDocument doc;
+    char deviceIdStr[32];
+    formatDeviceIdDecimal(deviceId, deviceIdStr, sizeof(deviceIdStr));
+    doc["device_id"] = deviceIdStr;
+    doc["command_type"] = commandType;
+    doc["status"] = statusStr;
+    if (retryCount >= 0) doc["retry_count"] = retryCount;
+    if (errorMessage.length() > 0) doc["error_message"] = errorMessage;
+    if (fromStatus) doc["from"] = fromStatus;
+
+    return queueWrite("/commands/status", doc);
 }
 
 bool DatabaseManager::writeEvent(uint64_t deviceId, uint8_t eventType, uint8_t severity,
@@ -221,20 +300,14 @@ bool DatabaseManager::writeEvent(uint64_t deviceId, uint8_t eventType, uint8_t s
 #if !DB_API_ENABLED
     return false;
 #endif
-    
+
     JsonDocument doc;
-    // Convert uint64_t to string to avoid truncation on 32-bit systems
     char deviceIdStr[32];
-    snprintf(deviceIdStr, sizeof(deviceIdStr), "%llu", (unsigned long long)deviceId);
+    formatDeviceIdDecimal(deviceId, deviceIdStr, sizeof(deviceIdStr));
     doc["device_id"] = deviceIdStr;
     doc["event_type"] = eventType;
     doc["severity"] = severity;
     doc["message"] = message;
-    
-    if (status == DB_CONNECTED) {
-        return postJson("/events", doc);
-    } else {
-        queueWrite("/events", doc);
-        return false;
-    }
+
+    return queueWrite("/events", doc);
 }
