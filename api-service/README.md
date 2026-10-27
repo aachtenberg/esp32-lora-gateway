@@ -160,7 +160,9 @@ Environment variables:
 - `GET /api/health` - Health check
 - `POST /api/devices` - Device updates (UPSERT)
 - `POST /api/packets` - Packet history (INSERT)
-- `POST /api/commands` - Commands (INSERT)
+- `GET /api/commands?limit=N` - Recent command history with device names (newest first)
+- `POST /api/commands` - Commands (INSERT; `parameters` must be a JSON string)
+- `GET /api/events?limit=N` - Recent events with device names
 - `POST /api/events` - Events (INSERT)
 
 See [TELEGRAF_SPEC.md](../docs/TELEGRAF_SPEC.md) for payload formats.
@@ -215,3 +217,16 @@ docker logs -f esp32-lora-api
 **503 on /api/health:**
 - Database connection failed
 - Check DB_HOST and credentials
+
+## Deployment (k3s)
+
+The service runs as the `esp32-lora-api` Deployment in the `iot` namespace of the
+homelab k3s cluster (manifest: `homelab-infra/k3s/base/iot/esp32-lora-api.yml`,
+applied by ArgoCD). The image is built locally on the Pi and imported into k3s
+containerd (`imagePullPolicy: Never`). Ship a code change with:
+
+```bash
+./deploy.sh
+```
+
+See the script for the individual steps and the rollback command.

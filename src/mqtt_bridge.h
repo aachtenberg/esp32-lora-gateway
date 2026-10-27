@@ -26,4 +26,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length);
 // Reconnect to MQTT broker
 bool reconnectMqtt();
 
+// True while the client is connected to the broker (for the dashboard)
+bool isMqttConnected();
+
 #endif // MQTT_BRIDGE_H
