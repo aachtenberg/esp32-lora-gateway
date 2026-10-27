@@ -21,6 +21,7 @@ static void formatDeviceIdDecimal(uint64_t deviceId, char* out, size_t len) {
 DatabaseManager::DatabaseManager()
     : status(DB_DISCONNECTED)
     , queueMutex(NULL)
+    , headFailures(0)
     , lastReconnectAttempt(0)
     , failedWrites(0)
     , reconnectAttempts(0)
@@ -93,6 +94,11 @@ void DatabaseManager::attemptConnection() {
  * can be copied out, posted with the lock released, and popped afterwards.
  * Bounded by DRAIN_BUDGET_MS per pass and feeds the watchdog between posts so
  * a slow API cannot starve the main loop.
+ *
+ * Outcomes: OK and REJECTED (4xx) pop the entry. SERVER_ERROR (5xx) keeps
+ * the entry for a retry but drops it after MAX_HEAD_FAILURES so one bad
+ * record cannot block everything behind it; the API answered, so we stay
+ * connected. Only UNREACHABLE (no HTTP response) marks the API disconnected.
  */
 void DatabaseManager::processWriteQueue() {
     uint32_t started = millis();
@@ -107,16 +113,30 @@ void DatabaseManager::processWriteQueue() {
         if (!have) break;
 
         esp_task_wdt_reset();
-        if (postJson(write.endpoint, write.doc)) {
+        PostResult result = postJson(write.endpoint, write.doc);
+
+        if (result == POST_UNREACHABLE) {
+            Serial.println("⚠️  Database API unreachable, marking disconnected");
+            status = DB_DISCONNECTED;
+            break;
+        }
+
+        bool drop = (result == POST_OK || result == POST_REJECTED);
+        if (result == POST_SERVER_ERROR) {
+            headFailures++;
+            if (headFailures >= MAX_HEAD_FAILURES) {
+                Serial.printf("⚠️  Dropping %s after %d server errors\n", write.endpoint.c_str(), headFailures);
+                drop = true;
+            } else {
+                break;  // retry this entry on the next pass
+            }
+        }
+        if (drop) {
+            headFailures = 0;
             LOCK_WRITES();
             if (!writeQueue.empty()) writeQueue.pop();
             UNLOCK_WRITES();
-            processed++;
-        } else {
-            // Connection likely failed; leave the entry for the next attempt
-            Serial.println("⚠️  Database write failed, marking disconnected");
-            status = DB_DISCONNECTED;
-            break;
+            if (result == POST_OK) processed++;
         }
     }
     esp_task_wdt_reset();
@@ -149,7 +169,7 @@ void DatabaseManager::checkConnectionHealth() {
     }
 }
 
-bool DatabaseManager::postJson(const String& endpoint, const JsonDocument& doc) {
+DatabaseManager::PostResult DatabaseManager::postJson(const String& endpoint, const JsonDocument& doc) {
     String url = apiBaseUrl + endpoint;
     http.begin(url);
     http.addHeader("Content-Type", "application/json");
@@ -162,20 +182,25 @@ bool DatabaseManager::postJson(const String& endpoint, const JsonDocument& doc) 
     http.end();
 
     if (httpCode >= 200 && httpCode < 300) {
-        return true;
+        return POST_OK;
     }
 
-    // 4xx means the API rejected this record; retrying it would never succeed
-    // and would block everything behind it. Drop it and keep the connection.
+    failedWrites++;
+
+    // 4xx: the API rejected this record; retrying would never succeed.
     if (httpCode >= 400 && httpCode < 500) {
         Serial.printf("⚠️  POST %s rejected: HTTP %d (dropping record)\n", endpoint.c_str(), httpCode);
-        failedWrites++;
-        return true;
+        return POST_REJECTED;
+    }
+
+    // Negative codes are HTTPClient transport errors (no response at all).
+    if (httpCode < 0) {
+        Serial.printf("⚠️  POST %s unreachable: %s\n", endpoint.c_str(), HTTPClient::errorToString(httpCode).c_str());
+        return POST_UNREACHABLE;
     }
 
     Serial.printf("⚠️  POST %s failed: HTTP %d\n", endpoint.c_str(), httpCode);
-    failedWrites++;
-    return false;
+    return POST_SERVER_ERROR;
 }
 
 bool DatabaseManager::queueWrite(const String& endpoint, const JsonDocument& doc) {

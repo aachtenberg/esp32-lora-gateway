@@ -324,13 +324,15 @@ func commandStatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// $3 is both assigned to a varchar column and compared as text; without the
+	// casts Postgres reports "inconsistent types deduced for parameter $3".
 	query := `
 		UPDATE commands SET
-			status = $3,
-			retry_count = COALESCE($4, retry_count),
-			error_message = COALESCE($5, error_message),
-			sent_at = CASE WHEN $3 = 'sent' AND sent_at IS NULL THEN NOW() ELSE sent_at END,
-			confirmed_at = CASE WHEN $3 = 'confirmed' THEN NOW() ELSE confirmed_at END
+			status = $3::text,
+			retry_count = COALESCE($4::int, retry_count),
+			error_message = COALESCE($5::text, error_message),
+			sent_at = CASE WHEN $3::text = 'sent' AND sent_at IS NULL THEN NOW() ELSE sent_at END,
+			confirmed_at = CASE WHEN $3::text = 'confirmed' THEN NOW() ELSE confirmed_at END
 		WHERE id = (
 			SELECT id FROM commands
 			WHERE device_id = $1 AND command_type = $2 AND status IN ('queued', 'sent')

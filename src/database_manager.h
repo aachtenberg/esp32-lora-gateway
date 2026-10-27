@@ -83,8 +83,12 @@ private:
     void attemptConnection();
     void processWriteQueue();
     void checkConnectionHealth();
-    bool postJson(const String& endpoint, const JsonDocument& doc);
+    // Outcome of one HTTP post
+    enum PostResult { POST_OK, POST_REJECTED, POST_SERVER_ERROR, POST_UNREACHABLE };
+    PostResult postJson(const String& endpoint, const JsonDocument& doc);
     bool queueWrite(const String& endpoint, const JsonDocument& doc);
+    uint8_t headFailures;            // consecutive server errors for the queue head
+    static const uint8_t MAX_HEAD_FAILURES = 3;
 };
 
 extern DatabaseManager dbManager;
