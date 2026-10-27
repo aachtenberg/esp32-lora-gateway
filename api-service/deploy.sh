@@ -2,12 +2,14 @@
 # Deploy the ESP32 LoRa API Service to the k3s cluster on the Pi.
 #
 # The deployment manifest lives in homelab-infra (k3s/base/iot/esp32-lora-api.yml)
-# and is applied by ArgoCD. It uses a locally built image with
-# imagePullPolicy: Never, so a code change is shipped by:
+# and is applied by ArgoCD (homelab-root, auto-sync with self-heal). It uses a
+# locally built image with imagePullPolicy: Never, so a code change is shipped by:
 #   1. copying the source to the Pi's compose build directory
 #   2. building the image there with docker compose (name: docker-esp32-lora-api:latest)
 #   3. importing it into k3s containerd
-#   4. restarting the deployment
+#   4. deleting the pod so the ReplicaSet recreates it on the new image
+# Step 4 deliberately avoids `kubectl rollout restart`: that edits the Deployment
+# spec (a restartedAt annotation), which ArgoCD self-heal would revert.
 #
 # Usage: ./deploy.sh            (run from api-service/)
 set -euo pipefail
@@ -39,8 +41,8 @@ ssh "${PI}" "sudo k3s ctr images export /tmp/esp32-lora-api-prev.tar ${IMAGE} >/
 echo "📥 Importing image into k3s containerd"
 ssh "${PI}" "docker save ${IMAGE} | sudo k3s ctr images import -"
 
-echo "🔄 Restarting deployment ${NAMESPACE}/${DEPLOY}"
-ssh "${PI}" "kubectl -n ${NAMESPACE} rollout restart deployment/${DEPLOY} && kubectl -n ${NAMESPACE} rollout status deployment/${DEPLOY} --timeout=180s"
+echo "🔄 Recreating the ${NAMESPACE}/${DEPLOY} pod on the new image"
+ssh "${PI}" "kubectl -n ${NAMESPACE} delete pod -l app.kubernetes.io/name=${DEPLOY} --wait=true && kubectl -n ${NAMESPACE} rollout status deployment/${DEPLOY} --timeout=180s"
 
 echo "🩺 Verifying"
 sleep 2
@@ -53,7 +55,7 @@ cat <<EOF
 ✅ Done.
 
 Rollback (if needed):
-  ssh ${PI} "sudo k3s ctr images import /tmp/esp32-lora-api-prev.tar && kubectl -n ${NAMESPACE} rollout restart deployment/${DEPLOY}"
+  ssh ${PI} "sudo k3s ctr images import /tmp/esp32-lora-api-prev.tar && kubectl -n ${NAMESPACE} delete pod -l app.kubernetes.io/name=${DEPLOY}"
 
 Schema changes are not applied by this script. If schema.sql changed:
   ssh ${PI} "kubectl -n data exec -i sre-postgres-0 -- psql -U sre_agent -d iot_sensors" < schema.sql
