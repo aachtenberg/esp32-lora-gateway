@@ -179,8 +179,8 @@ void updateDeviceInfo(uint64_t deviceId, uint16_t seqNum, int16_t rssi, int8_t s
         device = &devices[deviceCount - 1];
     }
     
-    // Update info
-    device->lastSeen = millis();
+    // Update info (0 is the "not heard this boot" sentinel)
+    device->lastSeen = millis() ? millis() : 1;
     device->lastRssi = rssi;
     device->lastSnr = snr;
     device->packetCount++;
@@ -276,7 +276,7 @@ void addDevice(uint64_t deviceId, const String& name, const String& location) {
     devices[deviceCount].deviceName = name;
     devices[deviceCount].location = location;
     devices[deviceCount].sensorType = "Unknown";
-    devices[deviceCount].lastSeen = millis();
+    devices[deviceCount].lastSeen = 0;  // set by updateDeviceInfo on the first packet
     devices[deviceCount].lastRssi = 0;
     devices[deviceCount].lastSnr = 0;
     devices[deviceCount].packetCount = 0;
@@ -497,7 +497,6 @@ bool saveRegistry() {
         deviceObj["name"] = devices[i].deviceName;
         deviceObj["location"] = devices[i].location;
         deviceObj["sensorType"] = devices[i].sensorType;
-        deviceObj["lastSeen"] = devices[i].lastSeen;
         deviceObj["packetCount"] = devices[i].packetCount;
         deviceObj["sensorInterval"] = devices[i].sensorInterval;
         deviceObj["deepSleepSec"] = devices[i].deepSleepSec;
@@ -568,7 +567,7 @@ bool loadRegistry() {
         devices[deviceCount].deviceName = deviceObj["name"] | "Unknown";
         devices[deviceCount].location = deviceObj["location"] | "Unknown";
         devices[deviceCount].sensorType = deviceObj["sensorType"] | "Unknown";
-        devices[deviceCount].lastSeen = deviceObj["lastSeen"] | 0;
+        devices[deviceCount].lastSeen = 0;  // millis() ticks do not survive a reboot
         devices[deviceCount].packetCount = deviceObj["packetCount"] | 0;
         devices[deviceCount].lastRssi = 0;
         devices[deviceCount].lastSnr = 0;
@@ -594,6 +593,35 @@ bool loadRegistry() {
  * Get a snapshot of all devices for web server
  * Returns JSON array - thread-safe for async web handlers
  */
+/**
+ * Presence: a sensor is online if it has been heard this boot within twice
+ * its expected reporting period (plus margin). A sleeping sensor reports
+ * roughly once per deep-sleep cycle. Caller holds the registry lock.
+ */
+static bool deviceIsOnline(const DeviceInfo& d, uint32_t now, uint32_t& elapsedSeconds, uint32_t& periodSec) {
+    periodSec = d.deepSleepSec > d.sensorInterval ? d.deepSleepSec : d.sensorInterval;
+    if (periodSec == 0) periodSec = 300;
+    if (d.lastSeen == 0) {
+        elapsedSeconds = 0;
+        return false;
+    }
+    elapsedSeconds = (now - d.lastSeen) / 1000;
+    return elapsedSeconds <= periodSec * 2 + 30;
+}
+
+void getRegistryStats(int& total, int& online) {
+    total = 0;
+    online = 0;
+    uint32_t now = millis();
+    LOCK_REGISTRY();
+    for (int i = 0; i < deviceCount; i++) {
+        uint32_t elapsed, period;
+        total++;
+        if (deviceIsOnline(devices[i], now, elapsed, period)) online++;
+    }
+    UNLOCK_REGISTRY();
+}
+
 String getDeviceRegistrySnapshot() {
     LOCK_REGISTRY();
     
@@ -609,15 +637,16 @@ String getDeviceRegistrySnapshot() {
         char idStr[20];
         snprintf(idStr, sizeof(idStr), "%016llX", devices[i].deviceId);
         
-        // Calculate seconds since last seen
-        uint32_t elapsedMs = currentMillis - devices[i].lastSeen;
-        uint32_t elapsedSeconds = elapsedMs / 1000;
+        uint32_t elapsedSeconds, period;
+        bool online = deviceIsOnline(devices[i], currentMillis, elapsedSeconds, period);
         
         deviceObj["id"] = idStr;
         deviceObj["name"] = devices[i].deviceName;
         deviceObj["location"] = devices[i].location;
         deviceObj["sensorType"] = devices[i].sensorType;
-        deviceObj["lastSeenSeconds"] = elapsedSeconds;  // Send elapsed seconds instead of timestamp
+        if (devices[i].lastSeen != 0) {
+            deviceObj["lastSeenSeconds"] = elapsedSeconds;  // omitted when not heard since boot
+        }
         deviceObj["lastRssi"] = devices[i].lastRssi;
         deviceObj["lastSnr"] = devices[i].lastSnr;
         deviceObj["packetCount"] = devices[i].packetCount;
@@ -625,14 +654,8 @@ String getDeviceRegistrySnapshot() {
         deviceObj["sensorInterval"] = devices[i].sensorInterval;
         deviceObj["deepSleepSec"] = devices[i].deepSleepSec;
 
-        // Online = seen within twice the expected reporting period (plus margin).
-        // A sleeping sensor reports roughly once per deep-sleep cycle.
-        uint32_t period = devices[i].deepSleepSec > devices[i].sensorInterval
-                              ? devices[i].deepSleepSec : devices[i].sensorInterval;
-        if (period == 0) period = 300;
-        uint32_t onlineWindow = period * 2 + 30;
         deviceObj["expectedPeriodSec"] = period;
-        deviceObj["online"] = elapsedSeconds <= onlineWindow;
+        deviceObj["online"] = online;
 
         // Last decoded readings
         const DeviceReading& r = devices[i].reading;

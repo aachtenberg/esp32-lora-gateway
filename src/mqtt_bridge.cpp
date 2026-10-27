@@ -26,6 +26,9 @@ static PubSubClient mqttClient(wifiClient);
 
 // Reconnection tracking
 static uint32_t lastMqttReconnectAttempt = 0;
+// Connection state mirrored for other tasks. PubSubClient::connected() is not
+// a pure read (it can stop() the socket), so only the MQTT task calls it.
+static volatile bool mqttConnectedFlag = false;
 
 // External function to get packet queue from lora_receiver
 extern QueueHandle_t getPacketQueue();
@@ -90,7 +93,8 @@ void mqttTask(void* parameter) {
         esp_task_wdt_reset();
         
         // Maintain MQTT connection
-        if (!mqttClient.connected()) {
+        mqttConnectedFlag = mqttClient.connected();
+        if (!mqttConnectedFlag) {
             uint32_t now = millis();
             if (now - lastMqttReconnectAttempt > MQTT_RECONNECT_INTERVAL_MS) {
                 lastMqttReconnectAttempt = now;
@@ -535,7 +539,7 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
  * Reconnect to MQTT broker
  */
 bool isMqttConnected() {
-    return mqttClient.connected();
+    return mqttConnectedFlag;
 }
 
 bool reconnectMqtt() {

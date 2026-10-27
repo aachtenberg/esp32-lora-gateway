@@ -16,6 +16,7 @@
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
 #include <WiFi.h>
+#include <esp_task_wdt.h>
 
 AsyncWebServer server(80);
 
@@ -61,10 +62,12 @@ static uint32_t lastDashboardPoll = 0;   // last time a browser asked for histor
 static const uint32_t CACHE_REFRESH_MS = 10000;   // refresh period while a dashboard is open
 static const uint32_t DASHBOARD_IDLE_MS = 60000;  // stop refreshing this long after the last poll
 
-static void setCache(String& cache, bool& okFlag, const String& value, bool ok) {
+// okFlag means "a body has been fetched successfully at some point". A later
+// failed refresh keeps serving the last good body rather than flipping to 503.
+static void setCache(String& cache, bool& okFlag, const String& value) {
     if (cacheMutex) xSemaphoreTake(cacheMutex, portMAX_DELAY);
-    if (ok) cache = value;
-    okFlag = ok;
+    cache = value;
+    okFlag = true;
     if (cacheMutex) xSemaphoreGive(cacheMutex);
 }
 
@@ -77,18 +80,22 @@ static String readCache(const String& cache, bool& okFlag, bool& okOut) {
 }
 
 static void refreshCache(const char* path, String& cache, bool& okFlag) {
+    // Runs on the loop task after dbManager.loop(), which may already have
+    // spent time on its own posts. Keep this short and feed the watchdog on
+    // both sides so one slow API response cannot be the thing that trips it.
+    esp_task_wdt_reset();
     HTTPClient http;
     String url = String(DB_API_URL) + path;
     http.begin(url);
-    http.setTimeout(2500);
+    http.setTimeout(1500);
     int httpCode = http.GET();
     if (httpCode == 200) {
-        setCache(cache, okFlag, http.getString(), true);
+        setCache(cache, okFlag, http.getString());
     } else {
-        Serial.printf("[WEB] History fetch %s failed: HTTP %d\n", path, httpCode);
-        setCache(cache, okFlag, "", false);
+        Serial.printf("[WEB] History fetch %s failed: HTTP %d (serving last good copy)\n", path, httpCode);
     }
     http.end();
+    esp_task_wdt_reset();
 }
 
 void webServerLoop() {
@@ -260,8 +267,8 @@ const char index_html[] PROGMEM = R"rawliteral(
 
             <div class="section">
                 <div class="section-header">
-                    <h2>Command History</h2>
-                    <div class="description">Commands queued by this gateway, from the database</div>
+                    <h2>Command Log</h2>
+                    <div class="description">Commands this gateway accepted (queued) or rejected (failed), from the database. Delivery to the sensor is shown live in each card's Command Queue.</div>
                 </div>
                 <div id="commands" class="table-wrap"><div class="loading"><div class="spinner"></div></div></div>
             </div>
@@ -354,9 +361,6 @@ const char index_html[] PROGMEM = R"rawliteral(
             })
             .catch(e => showToast('❌ Error: ' + e.message, 'error'));
         }
-        function confirmCommand(deviceId, action, label) {
-            if (confirm(label + '?')) sendCommand(deviceId, action);
-        }
         function removeDevice(deviceId, name) {
             if (!confirm('Remove "' + name + '" from the gateway registry? It will be re-added automatically if it transmits again.')) return;
             fetch('/api/device?id=' + encodeURIComponent(deviceId), { method: 'DELETE' })
@@ -367,7 +371,23 @@ const char index_html[] PROGMEM = R"rawliteral(
             })
             .catch(e => showToast('❌ Error: ' + e.message, 'error'));
         }
-        function inputValue(id) { return document.getElementById(id).value; }
+
+        // One delegated listener for every card button. Device names and ids
+        // travel in data-* attributes and are read back as plain strings, so
+        // nothing from a device is ever interpolated into JavaScript source.
+        document.getElementById('sensors').addEventListener('click', (ev) => {
+            const btn = ev.target.closest('button[data-action]');
+            if (!btn) return;
+            const card = btn.closest('.card');
+            const id = card.dataset.id, name = card.dataset.name, action = btn.dataset.action;
+            if (action === 'remove') { removeDevice(id, name); return; }
+            if (btn.dataset.confirm && !confirm(btn.dataset.confirm + ' ' + name + '?')) return;
+            let value = null;
+            if (btn.dataset.input) {
+                value = card.querySelector('input[data-field="' + btn.dataset.input + '"]').value;
+            }
+            sendCommand(id, action, value, btn.dataset.string !== '1');
+        });
 
         function renderReadings(d) {
             const r = d.reading;
@@ -419,8 +439,9 @@ const char index_html[] PROGMEM = R"rawliteral(
                 ? `${esc(d.cmdQueueCount)} pending: ${d.cmdQueue.map(c => esc(c.type) + (c.retries > 0 ? ' (retry ' + esc(c.retries) + ')' : '')).join(', ')}`
                 : 'Empty';
             const id = d.id;
+            const lastSeen = d.lastSeenSeconds === undefined ? 'Not heard since gateway boot' : formatAgo(d.lastSeenSeconds);
             return `
-            <div class="card ${online ? '' : 'offline'}">
+            <div class="card ${online ? '' : 'offline'}" data-id="${attr(id)}" data-name="${attr(d.name)}">
                 <div class="sensor-header">
                     <div><div class="sensor-name">${icon} ${esc(d.name)}</div><div class="sensor-type">${esc(type)}${d.reading && d.reading.gps ? ' + GPS' : ''} · ${esc(d.location)}</div></div>
                     ${statusBadge}
@@ -428,7 +449,7 @@ const char index_html[] PROGMEM = R"rawliteral(
                 ${renderReadings(d)}
                 <div class="meta">
                     <div class="stat wide"><div class="stat-label">Device ID</div><div class="stat-value mono">${esc(id)}</div></div>
-                    <div class="stat"><div class="stat-label">Last Seen</div><div class="stat-value">${esc(formatAgo(d.lastSeenSeconds))}</div></div>
+                    <div class="stat"><div class="stat-label">Last Seen</div><div class="stat-value">${esc(lastSeen)}</div></div>
                     <div class="stat"><div class="stat-label">Packets</div><div class="stat-value">${esc(d.packetCount)} · seq #${esc(d.lastSequence)}</div></div>
                     <div class="stat"><div class="stat-label">RSSI / SNR</div><div class="stat-value">${esc(d.lastRssi)} dBm / ${esc(d.lastSnr)} dB</div></div>
                     <div class="stat"><div class="stat-label">Sleep / Interval</div><div class="stat-value">${esc(d.deepSleepSec)}s / ${esc(d.sensorInterval)}s</div></div>
@@ -436,23 +457,23 @@ const char index_html[] PROGMEM = R"rawliteral(
                 </div>
                 ${renderHealth(d)}
                 <div class="commands">
-                    <button onclick="sendCommand('${attr(id)}', 'status')">📊 Request Status</button>
-                    <button class="btn-danger" onclick="confirmCommand('${attr(id)}', 'restart', 'Restart ${attr(d.name)}')">🔄 Restart</button>
-                    ${isBME280 ? `<button onclick="sendCommand('${attr(id)}', 'calibrate')">🎯 Calibrate Baseline</button>
-                    <button onclick="confirmCommand('${attr(id)}', 'clear_baseline', 'Clear pressure baseline on ${attr(d.name)}')">🗑️ Clear Baseline</button>
+                    <button data-action="status">📊 Request Status</button>
+                    <button class="btn-danger" data-action="restart" data-confirm="Restart">🔄 Restart</button>
+                    ${isBME280 ? `<button data-action="calibrate">🎯 Calibrate Baseline</button>
+                    <button data-action="clear_baseline" data-confirm="Clear pressure baseline on">🗑️ Clear Baseline</button>
                     <div class="command-group"><label>Pressure Baseline (hPa)</label><div class="row">
-                        <input type="number" id="baseline_${attr(id)}" value="${d.reading && d.reading.pressure !== undefined ? attr(d.reading.pressure) : '1013.25'}" min="300" max="1100" step="0.01">
-                        <button class="btn-success" onclick="sendCommand('${attr(id)}', 'set_baseline', inputValue('baseline_${attr(id)}'))">Set</button></div></div>` : ''}
+                        <input type="number" id="baseline_${attr(id)}" data-field="baseline" value="${d.reading && d.reading.pressure !== undefined ? attr(d.reading.pressure) : '1013.25'}" min="300" max="1100" step="0.01">
+                        <button class="btn-success" data-action="set_baseline" data-input="baseline">Set</button></div></div>` : ''}
                     <div class="command-group"><label>Deep Sleep (seconds, 0–3600)</label><div class="row">
-                        <input type="number" id="sleep_${attr(id)}" value="${attr(d.deepSleepSec)}" min="0" max="3600">
-                        <button class="btn-success" onclick="sendCommand('${attr(id)}', 'set_sleep', inputValue('sleep_${attr(id)}'))">Set</button></div></div>
+                        <input type="number" id="sleep_${attr(id)}" data-field="sleep" value="${attr(d.deepSleepSec)}" min="0" max="3600">
+                        <button class="btn-success" data-action="set_sleep" data-input="sleep">Set</button></div></div>
                     <div class="command-group"><label>Sensor Interval (seconds, 5–3600)</label><div class="row">
-                        <input type="number" id="interval_${attr(id)}" value="${attr(d.sensorInterval)}" min="5" max="3600">
-                        <button class="btn-success" onclick="sendCommand('${attr(id)}', 'set_interval', inputValue('interval_${attr(id)}'))">Set</button></div></div>
+                        <input type="number" id="interval_${attr(id)}" data-field="interval" value="${attr(d.sensorInterval)}" min="5" max="3600">
+                        <button class="btn-success" data-action="set_interval" data-input="interval">Set</button></div></div>
                     <div class="command-group"><label>Device Name (max 31 chars)</label><div class="row">
-                        <input type="text" id="name_${attr(id)}" value="${attr(d.name)}" maxlength="31">
-                        <button class="btn-success" onclick="sendCommand('${attr(id)}', 'set_name', inputValue('name_${attr(id)}'), false)">Rename</button></div></div>
-                    <button class="btn-ghost" style="grid-column: span 2" onclick="removeDevice('${attr(id)}', '${attr(d.name)}')">✖ Remove from registry</button>
+                        <input type="text" id="name_${attr(id)}" data-field="name" value="${attr(d.name)}" maxlength="31">
+                        <button class="btn-success" data-action="set_name" data-input="name" data-string="1">Rename</button></div></div>
+                    <button class="btn-ghost" style="grid-column: span 2" data-action="remove">✖ Remove from registry</button>
                 </div>
             </div>`;
         }
@@ -585,16 +606,9 @@ void initWebServer() {
         doc["db_queue"] = dbManager.getQueueDepth();
         doc["db_failed_writes"] = dbManager.getFailedWrites();
 
-        // Sensor counts (online = reported within its expected window)
+        // Sensor counts (online = heard within its expected window)
         int total = 0, online = 0;
-        {
-            JsonDocument devices;
-            deserializeJson(devices, getDeviceRegistrySnapshot());
-            for (JsonObject d : devices.as<JsonArray>()) {
-                total++;
-                if (d["online"] | false) online++;
-            }
-        }
+        getRegistryStats(total, online);
         doc["sensors_total"] = total;
         doc["sensors_online"] = online;
 
@@ -621,14 +635,24 @@ void initWebServer() {
         request->send(ok ? 200 : 503, "application/json", ok ? payload : "[]");
     });
 
-    // API: Send command to sensor
-    server.on("/api/command", HTTP_POST, [](AsyncWebServerRequest *request){}, NULL,
-        [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
+    // API: Send command to sensor.
+    // The body callback only buffers chunks (into request->_tempObject, which
+    // the request frees); the request handler runs once the body is complete
+    // and does auth, parsing and the response. This way a POST without a body
+    // still hits auth and gets an answer, and multi-chunk bodies are whole.
+    server.on("/api/command", HTTP_POST,
+        [](AsyncWebServerRequest *request){
             if (!webAuth(request)) return;
+
+            char* body = (char*)request->_tempObject;
+            if (!body) {
+                request->send(400, "application/json", "{\"success\":false,\"error\":\"Missing body\"}");
+                return;
+            }
 
             // Parse JSON body
             JsonDocument doc;
-            DeserializationError error = deserializeJson(doc, data, len);
+            DeserializationError error = deserializeJson(doc, body);
 
             if (error) {
                 request->send(400, "application/json", "{\"success\":false,\"error\":\"Invalid JSON\"}");
@@ -653,8 +677,8 @@ void initWebServer() {
             JsonDocument cmdLog;
             cmdLog["action"] = action;
             if (strcmp(action, "set_interval") == 0) {
-                uint16_t value = doc["value"].as<uint16_t>();
-                if (value == 0) value = 90;  // Default if missing
+                // Default only when the key is absent; an explicit 0 must fail the range check
+                uint16_t value = doc["value"].isNull() ? 90 : doc["value"].as<uint16_t>();
 
                 // Validate interval range: must be between 5 and 3600 seconds
                 if (value < 5 || value > 3600) {
@@ -672,8 +696,8 @@ void initWebServer() {
                 success = queueCommand(deviceId, cmdType, (uint8_t*)valueStr, strlen(valueStr));
             }
             else if (strcmp(action, "set_sleep") == 0) {
-                uint16_t value = doc["value"].as<uint16_t>();
-                if (value == 0) value = 90;  // Default if missing
+                // Default only when the key is absent; 0 (no deep sleep) is a valid request
+                uint16_t value = doc["value"].isNull() ? 90 : doc["value"].as<uint16_t>();
 
                 // Validate sleep value: maximum 3600 seconds
                 if (value > 3600) {
@@ -752,6 +776,18 @@ void initWebServer() {
             } else {
                 request->send(500, "application/json", "{\"success\":false,\"error\":\"Failed to queue command\"}");
                 dbManager.writeCommand(deviceId, cmdType, cmdParams, "failed");
+            }
+        },
+        NULL,
+        [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total){
+            const size_t MAX_BODY = 1024;
+            if (total == 0 || total > MAX_BODY) return;  // request handler answers 400
+            if (index == 0) {
+                request->_tempObject = malloc(total + 1);  // freed by the request destructor
+                if (request->_tempObject) ((char*)request->_tempObject)[total] = '\0';
+            }
+            if (request->_tempObject && index + len <= total) {
+                memcpy((char*)request->_tempObject + index, data, len);
             }
         }
     );

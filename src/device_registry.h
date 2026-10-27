@@ -42,7 +42,7 @@ struct DeviceInfo {
     String deviceName;        // Descriptive device name
     String location;          // Physical location of device
     String sensorType;        // Sensor type: "BME280", "DS18B20", or "Unknown"
-    uint32_t lastSeen;        // Timestamp of last packet
+    uint32_t lastSeen;        // millis() of last packet this boot; 0 = not heard since boot
     int16_t lastRssi;         // Last RSSI value
     int8_t lastSnr;           // Last SNR value
     uint32_t packetCount;     // Total packets received
@@ -117,5 +117,8 @@ bool loadRegistry();
 
 // Get thread-safe snapshot of all devices (for web server)
 String getDeviceRegistrySnapshot();
+
+// Cheap counts for the gateway status endpoint (no serialization)
+void getRegistryStats(int& total, int& online);
 
 #endif // DEVICE_REGISTRY_H

@@ -28,40 +28,76 @@ struct QueuedCommand {
     uint8_t retryCount;
 };
 
+// The queue is written by the web server (async_tcp task) and the MQTT task,
+// and read by the registry snapshot. All access goes through queueMutex.
+// Radio transmission never happens while the lock is held, and never on the
+// async_tcp task: queueCommand() only enqueues, and the MQTT task transmits in
+// retryCommandsForSensor() once the sensor opens its RX window after a packet.
 static QueuedCommand commandQueue[MAX_QUEUED_COMMANDS];
 static uint8_t queueSize = 0;
+static SemaphoreHandle_t queueMutex = NULL;
+
+#define LOCK_QUEUE()   do { if (queueMutex) xSemaphoreTake(queueMutex, portMAX_DELAY); } while (0)
+#define UNLOCK_QUEUE() do { if (queueMutex) xSemaphoreGive(queueMutex); } while (0)
 
 /**
  * Initialize command sender
  */
 void initCommandSender() {
+    if (queueMutex == NULL) {
+        queueMutex = xSemaphoreCreateMutex();
+    }
+    LOCK_QUEUE();
     queueSize = 0;
+    UNLOCK_QUEUE();
     Serial.println("[CMD] Command sender initialized with retry mechanism");
 }
 
 /**
- * Add command to persistent queue
+ * Remove a queue entry by index (caller holds queueMutex)
+ */
+static void removeQueuedAt(int index) {
+    for (int j = index; j < queueSize - 1; j++) {
+        commandQueue[j] = commandQueue[j + 1];
+    }
+    queueSize--;
+}
+
+/**
+ * Add command to persistent queue.
+ * Does not transmit: callers may be on the async_tcp task, and a sleeping
+ * sensor only listens right after its own transmission anyway. The MQTT task
+ * sends it from retryCommandsForSensor() on the sensor's next packet.
  */
 bool queueCommand(uint64_t sensorId, uint8_t cmdType, const uint8_t* params, uint8_t paramLen) {
-    if (queueSize >= MAX_QUEUED_COMMANDS) {
-        Serial.println("❌ [CMD] Command queue full!");
+    if (paramLen > sizeof(commandQueue[0].params)) {
+        Serial.println("❌ [CMD] Command parameters too long");
         return false;
     }
-    
+
+    LOCK_QUEUE();
+
     // Check if same command already queued for this sensor
     for (int i = 0; i < queueSize; i++) {
         if (commandQueue[i].sensorId == sensorId && commandQueue[i].cmdType == cmdType) {
             Serial.println("⚠️  [CMD] Command already queued, updating timestamp");
             commandQueue[i].queuedAt = millis();
             commandQueue[i].retryCount = 0;
+            commandQueue[i].paramLen = paramLen;
             if (paramLen > 0 && params) {
                 memcpy(commandQueue[i].params, params, paramLen);
-                commandQueue[i].paramLen = paramLen;
             }
+            UNLOCK_QUEUE();
             return true;
         }
     }
-    
+
+    if (queueSize >= MAX_QUEUED_COMMANDS) {
+        UNLOCK_QUEUE();
+        Serial.println("❌ [CMD] Command queue full!");
+        return false;
+    }
+
     // Add new command to queue
     QueuedCommand* cmd = &commandQueue[queueSize];
     cmd->sensorId = sensorId;
@@ -73,18 +109,17 @@ bool queueCommand(uint64_t sensorId, uint8_t cmdType, const uint8_t* params, uin
     cmd->queuedAt = millis();
     cmd->retryCount = 0;
     queueSize++;
-    
-    Serial.printf("✅ [CMD] Queued command 0x%02X for sensor 0x%016llX (%d in queue)\n", 
-                  cmdType, sensorId, queueSize);
-    
-    // Try sending immediately
-    sendCommand(sensorId, cmdType, params, paramLen);
-    
+    uint8_t depth = queueSize;
+
+    UNLOCK_QUEUE();
+
+    Serial.printf("✅ [CMD] Queued command 0x%02X for sensor 0x%016llX (%d in queue)\n",
+                  cmdType, sensorId, depth);
     return true;
 }
 
 /**
- * Remove expired commands from queue
+ * Remove expired commands from queue (caller holds queueMutex)
  */
 static void cleanExpiredCommands() {
     uint32_t now = millis();
@@ -93,52 +128,61 @@ static void cleanExpiredCommands() {
         if (now - commandQueue[i].queuedAt > COMMAND_EXPIRATION_MS) {
             Serial.printf("⏰ [CMD] Command 0x%02X expired for sensor 0x%016llX\n", 
                           commandQueue[i].cmdType, commandQueue[i].sensorId);
-            
-            // Remove from queue by shifting remaining items
-            for (int j = i; j < queueSize - 1; j++) {
-                commandQueue[j] = commandQueue[j + 1];
-            }
-            queueSize--;
+            removeQueuedAt(i);
         }
     }
 }
 
 /**
  * Retry queued commands for a specific sensor
- * Call this when sensor transmits (opens its RX window)
+ * Call this (from the MQTT task) when the sensor transmits and opens its RX window.
+ * The queue lock is released while the radio is busy.
  */
 void retryCommandsForSensor(uint64_t sensorId) {
+    // Snapshot this sensor's commands under the lock
+    QueuedCommand pending[MAX_QUEUED_COMMANDS];
+    int pendingCount = 0;
+
+    LOCK_QUEUE();
     cleanExpiredCommands();
-    
-    bool foundCommands = false;
     for (int i = 0; i < queueSize; i++) {
         if (commandQueue[i].sensorId == sensorId) {
-            foundCommands = true;
             commandQueue[i].retryCount++;
-            
-            Serial.printf("🔄 [CMD] Retrying command 0x%02X for sensor 0x%016llX (attempt %d)\n", 
-                          commandQueue[i].cmdType, sensorId, commandQueue[i].retryCount);
-            
-            bool success = sendCommand(sensorId, commandQueue[i].cmdType, 
-                                      commandQueue[i].params, commandQueue[i].paramLen);
-            
-            if (success) {
-                // Remove from queue on successful transmission
-                Serial.printf("✅ [CMD] Command sent, removing from queue\n");
-                for (int j = i; j < queueSize - 1; j++) {
-                    commandQueue[j] = commandQueue[j + 1];
-                }
-                queueSize--;
-                i--;  // Adjust index after removal
-            }
-            
-            // Small delay between retries
-            delay(50);
+            pending[pendingCount++] = commandQueue[i];
         }
     }
-    
-    if (foundCommands && queueSize > 0) {
-        Serial.printf("📋 [CMD] %d commands remaining in queue\n", queueSize);
+    UNLOCK_QUEUE();
+
+    if (pendingCount == 0) return;
+
+    for (int p = 0; p < pendingCount; p++) {
+        Serial.printf("🔄 [CMD] Retrying command 0x%02X for sensor 0x%016llX (attempt %d)\n",
+                      pending[p].cmdType, sensorId, pending[p].retryCount);
+
+        bool success = sendCommand(sensorId, pending[p].cmdType,
+                                   pending[p].params, pending[p].paramLen);
+
+        if (success) {
+            Serial.printf("✅ [CMD] Command sent, removing from queue\n");
+            LOCK_QUEUE();
+            for (int i = 0; i < queueSize; i++) {
+                if (commandQueue[i].sensorId == sensorId && commandQueue[i].cmdType == pending[p].cmdType) {
+                    removeQueuedAt(i);
+                    break;
+                }
+            }
+            UNLOCK_QUEUE();
+        }
+
+        // Small delay between retries
+        delay(50);
+    }
+
+    LOCK_QUEUE();
+    uint8_t remaining = queueSize;
+    UNLOCK_QUEUE();
+    if (remaining > 0) {
+        Serial.printf("📋 [CMD] %d commands remaining in queue\n", remaining);
     }
 }
 
@@ -390,11 +434,13 @@ bool sendSetNameCommand(uint64_t sensorId, const char* name) {
  */
 int getQueuedCommandCount(uint64_t sensorId) {
     int count = 0;
+    LOCK_QUEUE();
     for (int i = 0; i < queueSize; i++) {
         if (commandQueue[i].sensorId == sensorId) {
             count++;
         }
     }
+    UNLOCK_QUEUE();
     return count;
 }
 
@@ -405,6 +451,7 @@ String getQueuedCommandsJson(uint64_t sensorId) {
     String result = "[";
     bool first = true;
     
+    LOCK_QUEUE();
     for (int i = 0; i < queueSize; i++) {
         if (commandQueue[i].sensorId == sensorId) {
             if (!first) result += ",";
@@ -430,6 +477,7 @@ String getQueuedCommandsJson(uint64_t sensorId) {
             result += "}";
         }
     }
+    UNLOCK_QUEUE();
     
     result += "]";
     return result;
