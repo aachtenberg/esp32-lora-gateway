@@ -684,8 +684,12 @@ void initWebServer() {
             // Parse device ID
             uint64_t deviceId = strtoull(deviceIdStr, nullptr, 16);
             
-            // Map action to command
+            // Map action to command. cmdType and cmdLog are recorded in the
+            // command history (PostgreSQL via API); parameters must be JSON.
             bool success = false;
+            uint8_t cmdType = 0;
+            JsonDocument cmdLog;
+            cmdLog["action"] = action;
             if (strcmp(action, "set_interval") == 0) {
                 uint16_t value = doc["value"].as<uint16_t>();
                 if (value == 0) value = 90;  // Default if missing
@@ -701,7 +705,9 @@ void initWebServer() {
                 // Format as ASCII decimal string (matches MQTT handler and command_sender)
                 char valueStr[8];
                 snprintf(valueStr, sizeof(valueStr), "%u", value);
-                success = queueCommand(deviceId, CMD_SET_INTERVAL, (uint8_t*)valueStr, strlen(valueStr));
+                cmdType = CMD_SET_INTERVAL;
+                cmdLog["value"] = value;
+                success = queueCommand(deviceId, cmdType, (uint8_t*)valueStr, strlen(valueStr));
             }
             else if (strcmp(action, "set_sleep") == 0) {
                 uint16_t value = doc["value"].as<uint16_t>();
@@ -718,19 +724,25 @@ void initWebServer() {
                 // Format as ASCII decimal string (matches MQTT handler and command_sender)
                 char valueStr[8];
                 snprintf(valueStr, sizeof(valueStr), "%u", value);
-                success = queueCommand(deviceId, CMD_SET_SLEEP, (uint8_t*)valueStr, strlen(valueStr));
+                cmdType = CMD_SET_SLEEP;
+                cmdLog["value"] = value;
+                success = queueCommand(deviceId, cmdType, (uint8_t*)valueStr, strlen(valueStr));
             }
             else if (strcmp(action, "calibrate") == 0) {
-                success = queueCommand(deviceId, CMD_CALIBRATE, nullptr, 0);
+                cmdType = CMD_CALIBRATE;
+                success = queueCommand(deviceId, cmdType, nullptr, 0);
             }
             else if (strcmp(action, "clear_baseline") == 0) {
-                success = queueCommand(deviceId, CMD_CLEAR_BASELINE, nullptr, 0);
+                cmdType = CMD_CLEAR_BASELINE;
+                success = queueCommand(deviceId, cmdType, nullptr, 0);
             }
             else if (strcmp(action, "restart") == 0) {
-                success = queueCommand(deviceId, CMD_RESTART, nullptr, 0);
+                cmdType = CMD_RESTART;
+                success = queueCommand(deviceId, cmdType, nullptr, 0);
             }
             else if (strcmp(action, "status") == 0) {
-                success = queueCommand(deviceId, CMD_STATUS, nullptr, 0);
+                cmdType = CMD_STATUS;
+                success = queueCommand(deviceId, cmdType, nullptr, 0);
             }
             else if (strcmp(action, "set_name") == 0) {
                 const char* name = doc["value"].as<const char*>();
@@ -741,21 +753,25 @@ void initWebServer() {
                 size_t nameLen = strlen(name);
                 if (nameLen > 31) nameLen = 31;  // Truncate to max length
                 Serial.printf("[WEB] set_name: value=%s\n", name);
-                success = queueCommand(deviceId, CMD_SET_NAME, (uint8_t*)name, nameLen);
+                cmdType = CMD_SET_NAME;
+                cmdLog["value"] = String(name).substring(0, nameLen);
+                success = queueCommand(deviceId, cmdType, (uint8_t*)name, nameLen);
             }
             else {
                 request->send(400, "application/json", "{\"success\":false,\"error\":\"Unknown action\"}");
                 return;
             }
             
+            String cmdParams;
+            serializeJson(cmdLog, cmdParams);
             if (success) {
                 request->send(200, "application/json", "{\"success\":true}");
                 Serial.printf("[WEB] Command queued: %s for device 0x%016llX\n", action, deviceId);
                 // Persist command to PostgreSQL via API
-                dbManager.writeCommand(deviceId, 0, String(action), "queued");
+                dbManager.writeCommand(deviceId, cmdType, cmdParams, "queued");
             } else {
                 request->send(500, "application/json", "{\"success\":false,\"error\":\"Failed to queue command\"}");
-                dbManager.writeCommand(deviceId, 0, String(action), "failed");
+                dbManager.writeCommand(deviceId, cmdType, cmdParams, "failed");
             }
         }
     );

@@ -5,6 +5,7 @@
 #include "secrets.h"
 #include "command_sender.h"
 #include "database_manager.h"
+#include "lora_protocol.h"
 #include <PubSubClient.h>
 #include <WiFi.h>
 #include <ArduinoJson.h>
@@ -441,6 +442,11 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     Serial.printf("[MQTT CMD] Action: %s for device: 0x%016llX\n", action, targetDevice);
     
     bool success = false;
+    // cmdType and cmdLog are recorded in the command history (PostgreSQL via
+    // API); parameters must be JSON.
+    uint8_t cmdType = 0;
+    JsonDocument cmdLog;
+    cmdLog["action"] = action;
     
     // Route to appropriate command sender
     if (strcmp(action, "set_interval") == 0) {
@@ -450,7 +456,9 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         // Pack seconds as ASCII decimal string
         char paramStr[16];
         snprintf(paramStr, sizeof(paramStr), "%lu", seconds);
-        success = queueCommand(targetDevice, 0x07, (uint8_t*)paramStr, strlen(paramStr));  // CMD_SET_INTERVAL
+        cmdType = CMD_SET_INTERVAL;
+        cmdLog["value"] = seconds;
+        success = queueCommand(targetDevice, cmdType, (uint8_t*)paramStr, strlen(paramStr));
         
     } else if (strcmp(action, "set_sleep") == 0) {
         uint32_t seconds = doc["value"] | 900;  // Default 15 minutes
@@ -459,19 +467,24 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         // Pack seconds as ASCII decimal string
         char paramStr[16];
         snprintf(paramStr, sizeof(paramStr), "%lu", seconds);
-        success = queueCommand(targetDevice, 0x06, (uint8_t*)paramStr, strlen(paramStr));  // CMD_SET_SLEEP
+        cmdType = CMD_SET_SLEEP;
+        cmdLog["value"] = seconds;
+        success = queueCommand(targetDevice, cmdType, (uint8_t*)paramStr, strlen(paramStr));
         
     } else if (strcmp(action, "restart") == 0) {
         Serial.println("  Sending restart command");
-        success = queueCommand(targetDevice, 0x04, nullptr, 0);  // CMD_RESTART
+        cmdType = CMD_RESTART;
+        success = queueCommand(targetDevice, cmdType, nullptr, 0);
         
     } else if (strcmp(action, "status") == 0) {
         Serial.println("  Requesting status update");
-        success = queueCommand(targetDevice, 0x05, nullptr, 0);  // CMD_STATUS
+        cmdType = CMD_STATUS;
+        success = queueCommand(targetDevice, cmdType, nullptr, 0);
 
     } else if (strcmp(action, "calibrate") == 0) {
         Serial.println("  Calibrating pressure baseline (current reading)");
-        success = queueCommand(targetDevice, 0x01, nullptr, 0);  // CMD_CALIBRATE
+        cmdType = CMD_CALIBRATE;
+        success = queueCommand(targetDevice, cmdType, nullptr, 0);
 
     } else if (strcmp(action, "set_baseline") == 0) {
         float baselineHpa = doc["value"] | 1013.25;  // Default sea level pressure
@@ -480,11 +493,14 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         // Pack baseline as ASCII decimal string
         char paramStr[16];
         snprintf(paramStr, sizeof(paramStr), "%.2f", baselineHpa);
-        success = queueCommand(targetDevice, 0x02, (uint8_t*)paramStr, strlen(paramStr));  // CMD_SET_BASELINE
+        cmdType = CMD_SET_BASELINE;
+        cmdLog["value"] = baselineHpa;
+        success = queueCommand(targetDevice, cmdType, (uint8_t*)paramStr, strlen(paramStr));
 
     } else if (strcmp(action, "clear_baseline") == 0) {
         Serial.println("  Clearing pressure baseline");
-        success = queueCommand(targetDevice, 0x03, nullptr, 0);  // CMD_CLEAR_BASELINE
+        cmdType = CMD_CLEAR_BASELINE;
+        success = queueCommand(targetDevice, cmdType, nullptr, 0);
 
     } else {
         Serial.printf("❌ Unknown action: %s\n", action);
@@ -492,6 +508,8 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
     }
     
     // Publish result and persist to database
+    String cmdParams;
+    serializeJson(cmdLog, cmdParams);
     if (success) {
         Serial.println("✅ Command queued for retry on sensor activity");
         // Optionally publish ACK back to MQTT
@@ -504,10 +522,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
         mqttClient.publish(ackTopic, ackPayload);
 
         // Persist command to PostgreSQL via API
-        dbManager.writeCommand(targetDevice, 0, String(action), "queued");
+        dbManager.writeCommand(targetDevice, cmdType, cmdParams, "queued");
     } else {
         Serial.println("❌ Command queueing failed");
-        dbManager.writeCommand(targetDevice, 0, String(action), "failed");
+        dbManager.writeCommand(targetDevice, cmdType, cmdParams, "failed");
     }
 }
 
