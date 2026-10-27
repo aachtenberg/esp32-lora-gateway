@@ -34,13 +34,13 @@ type DevicePayload struct {
 }
 
 type PacketPayload struct {
-	DeviceID   string          `json:"device_id"`
-	GatewayID  string          `json:"gateway_id"`
-	MsgType    int16           `json:"msg_type"`
-	SequenceNum int32          `json:"sequence_num"`
-	RSSI       int16           `json:"rssi"`
-	SNR        int16           `json:"snr"`
-	Payload    json.RawMessage `json:"payload"`
+	DeviceID    string          `json:"device_id"`
+	GatewayID   string          `json:"gateway_id"`
+	MsgType     int16           `json:"msg_type"`
+	SequenceNum int32           `json:"sequence_num"`
+	RSSI        int16           `json:"rssi"`
+	SNR         int16           `json:"snr"`
+	Payload     json.RawMessage `json:"payload"`
 }
 
 type CommandPayload struct {
@@ -48,6 +48,18 @@ type CommandPayload struct {
 	CommandType int16  `json:"command_type"`
 	Parameters  string `json:"parameters"`
 	Status      string `json:"status"`
+}
+
+// CommandStatusPayload updates the most recent open command (status queued or
+// sent) for a device and command type. The gateway queues at most one command
+// per device+type, so this identifies the row without the gateway having to
+// hold database ids.
+type CommandStatusPayload struct {
+	DeviceID     string  `json:"device_id"`
+	CommandType  int16   `json:"command_type"`
+	Status       string  `json:"status"`
+	RetryCount   *int    `json:"retry_count,omitempty"`
+	ErrorMessage *string `json:"error_message,omitempty"`
 }
 
 type EventPayload struct {
@@ -107,6 +119,7 @@ func main() {
 	http.HandleFunc("/api/health", corsHandler(healthHandler))
 	http.HandleFunc("/api/devices", corsHandler(devicesHandler))
 	http.HandleFunc("/api/commands", corsHandler(commandsHandler))
+	http.HandleFunc("/api/commands/status", corsHandler(commandStatusHandler))
 	http.HandleFunc("/api/events", corsHandler(eventsHandler))
 
 	// Start server
@@ -195,7 +208,7 @@ func commandsHandler(w http.ResponseWriter, r *http.Request) {
 
 		query := `
 			SELECT c.id, c.device_id, d.name, c.command_type, COALESCE(c.parameters, '{}'::jsonb),
-			       c.status, c.created_at
+			       c.status, c.created_at, c.sent_at, c.confirmed_at, COALESCE(c.retry_count, 0), c.error_message
 			FROM commands c
 			LEFT JOIN devices d ON c.device_id = d.device_id
 			ORDER BY c.created_at DESC
@@ -211,13 +224,17 @@ func commandsHandler(w http.ResponseWriter, r *http.Request) {
 		defer rows.Close()
 
 		type CommandResponse struct {
-			ID          int             `json:"id"`
-			DeviceID    string          `json:"device_id"`
-			DeviceName  string          `json:"device_name"`
-			CommandType int             `json:"command_type"`
-			Parameters  json.RawMessage `json:"parameters"`
-			Status      string          `json:"status"`
-			CreatedAt   string          `json:"created_at"`
+			ID           int             `json:"id"`
+			DeviceID     string          `json:"device_id"`
+			DeviceName   string          `json:"device_name"`
+			CommandType  int             `json:"command_type"`
+			Parameters   json.RawMessage `json:"parameters"`
+			Status       string          `json:"status"`
+			CreatedAt    string          `json:"created_at"`
+			SentAt       *string         `json:"sent_at"`
+			ConfirmedAt  *string         `json:"confirmed_at"`
+			RetryCount   int             `json:"retry_count"`
+			ErrorMessage *string         `json:"error_message"`
 		}
 
 		commands := []CommandResponse{}
@@ -225,7 +242,8 @@ func commandsHandler(w http.ResponseWriter, r *http.Request) {
 			var c CommandResponse
 			var deviceName *string
 			var params []byte
-			if err := rows.Scan(&c.ID, &c.DeviceID, &deviceName, &c.CommandType, &params, &c.Status, &c.CreatedAt); err != nil {
+			if err := rows.Scan(&c.ID, &c.DeviceID, &deviceName, &c.CommandType, &params, &c.Status, &c.CreatedAt,
+				&c.SentAt, &c.ConfirmedAt, &c.RetryCount, &c.ErrorMessage); err != nil {
 				log.Printf("Error scanning command: %v", err)
 				continue
 			}
@@ -262,11 +280,13 @@ func commandsHandler(w http.ResponseWriter, r *http.Request) {
 		INSERT INTO commands (
 			device_id, command_type, parameters, status, created_at
 		) VALUES ($1, $2, $3, $4, NOW())
+		RETURNING id
 	`
 
-	_, err := db.Exec(query,
+	var id int
+	err := db.QueryRow(query,
 		payload.DeviceID, payload.CommandType,
-		payload.Parameters, payload.Status)
+		payload.Parameters, payload.Status).Scan(&id)
 
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
@@ -274,8 +294,64 @@ func commandsHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	log.Printf("Command logged: device=%s type=%d", payload.DeviceID, payload.CommandType)
-	w.WriteHeader(http.StatusOK)
+	log.Printf("Command logged: device=%s type=%d id=%d", payload.DeviceID, payload.CommandType, id)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int{"id": id})
+}
+
+// commandStatusHandler moves the most recent open command for a device+type
+// through its lifecycle: queued -> sent -> confirmed, or queued/sent ->
+// timeout | superseded | failed. sent_at / confirmed_at are stamped on the
+// matching transition. A request that matches no open row is not an error
+// (the row may have been inserted while the gateway was offline).
+func commandStatusHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+
+	var payload CommandStatusPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, "Invalid JSON", http.StatusBadRequest)
+		log.Printf("Invalid JSON: %v", err)
+		return
+	}
+
+	switch payload.Status {
+	case "sent", "confirmed", "timeout", "superseded", "failed":
+	default:
+		http.Error(w, "Invalid status", http.StatusBadRequest)
+		return
+	}
+
+	query := `
+		UPDATE commands SET
+			status = $3,
+			retry_count = COALESCE($4, retry_count),
+			error_message = COALESCE($5, error_message),
+			sent_at = CASE WHEN $3 = 'sent' AND sent_at IS NULL THEN NOW() ELSE sent_at END,
+			confirmed_at = CASE WHEN $3 = 'confirmed' THEN NOW() ELSE confirmed_at END
+		WHERE id = (
+			SELECT id FROM commands
+			WHERE device_id = $1 AND command_type = $2 AND status IN ('queued', 'sent')
+			ORDER BY created_at DESC
+			LIMIT 1
+		)
+	`
+
+	res, err := db.Exec(query,
+		payload.DeviceID, payload.CommandType, payload.Status,
+		payload.RetryCount, payload.ErrorMessage)
+	if err != nil {
+		http.Error(w, "Database error", http.StatusInternalServerError)
+		log.Printf("Failed to update command status: %v", err)
+		return
+	}
+	n, _ := res.RowsAffected()
+
+	log.Printf("Command status: device=%s type=%d -> %s (%d row)", payload.DeviceID, payload.CommandType, payload.Status, n)
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]int64{"updated": n})
 }
 
 func eventsHandler(w http.ResponseWriter, r *http.Request) {

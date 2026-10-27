@@ -3,6 +3,7 @@
 
 #include <Arduino.h>
 #include <stdint.h>
+#include "lora_protocol.h"
 
 // Maximum queued commands
 #define MAX_QUEUED_COMMANDS 10
@@ -45,6 +46,19 @@ bool queueCommand(uint64_t sensorId, uint8_t cmdType, const uint8_t* params, uin
  * @param sensorId: 64-bit device ID of sensor that just transmitted
  */
 void retryCommandsForSensor(uint64_t sensorId);
+
+/**
+ * Confirmation by observed effect. Sensors do not acknowledge commands, so a
+ * command counts as confirmed when a later packet shows it took effect:
+ *  - CMD_STATUS: any status report received after the send
+ *  - CMD_SET_SLEEP / CMD_SET_INTERVAL / CMD_SET_NAME: status report with the sent value
+ *  - CMD_RESTART: EVENT_STARTUP received after the send
+ * Calibration/baseline commands have no observable proof and stay "sent".
+ *
+ * @param packetReceivedMs: millis() when the packet arrived (must be after the send)
+ */
+void confirmCommandsFromStatus(uint64_t sensorId, const StatusPayload* status, uint32_t packetReceivedMs);
+void confirmCommandsFromEvent(uint64_t sensorId, uint8_t eventType, uint32_t packetReceivedMs);
 
 /**
  * Send CMD_SET_SLEEP command to sensor

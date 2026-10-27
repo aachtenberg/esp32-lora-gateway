@@ -10,6 +10,8 @@
 #include <RadioLib.h>
 
 // Forward declarations - radio initialized in lora_receiver.cpp
+#include "database_manager.h"
+
 extern SX1262* getRadio();
 extern uint64_t getGatewayId();
 extern bool isRadioInitialized();
@@ -39,6 +41,60 @@ static SemaphoreHandle_t queueMutex = NULL;
 
 #define LOCK_QUEUE()   do { if (queueMutex) xSemaphoreTake(queueMutex, portMAX_DELAY); } while (0)
 #define UNLOCK_QUEUE() do { if (queueMutex) xSemaphoreGive(queueMutex); } while (0)
+
+// Commands transmitted and awaiting confirmation by observed effect
+// (see confirmCommandsFromStatus/Event). Guarded by queueMutex.
+struct SentCommand {
+    uint64_t sensorId;
+    uint8_t cmdType;
+    uint8_t params[40];
+    uint8_t paramLen;
+    uint32_t sentAt;
+};
+#define CONFIRM_WINDOW_MS (15 * 60 * 1000)
+static SentCommand sentCommands[MAX_QUEUED_COMMANDS];
+static uint8_t sentCount = 0;
+
+// Caller holds queueMutex
+static void removeSentAt(int index) {
+    for (int j = index; j < sentCount - 1; j++) {
+        sentCommands[j] = sentCommands[j + 1];
+    }
+    sentCount--;
+}
+
+// Caller holds queueMutex
+static void expireSentCommands(uint32_t now) {
+    for (int i = sentCount - 1; i >= 0; i--) {
+        if (now - sentCommands[i].sentAt > CONFIRM_WINDOW_MS) removeSentAt(i);
+    }
+}
+
+// Caller holds queueMutex. Replaces an older entry for the same sensor+type.
+static void rememberSent(const QueuedCommand& cmd) {
+    uint32_t now = millis();
+    expireSentCommands(now);
+    for (int i = 0; i < sentCount; i++) {
+        if (sentCommands[i].sensorId == cmd.sensorId && sentCommands[i].cmdType == cmd.cmdType) {
+            removeSentAt(i);
+            break;
+        }
+    }
+    if (sentCount >= MAX_QUEUED_COMMANDS) removeSentAt(0);
+    SentCommand& s = sentCommands[sentCount++];
+    s.sensorId = cmd.sensorId;
+    s.cmdType = cmd.cmdType;
+    s.paramLen = cmd.paramLen < sizeof(s.params) ? cmd.paramLen : sizeof(s.params);
+    memcpy(s.params, cmd.params, s.paramLen);
+    s.sentAt = now;
+}
+
+// Caller holds queueMutex. Null-terminated copy of a sent command's params.
+static void sentParamsAsString(const SentCommand& s, char* out, size_t len) {
+    size_t n = s.paramLen < len - 1 ? s.paramLen : len - 1;
+    memcpy(out, s.params, n);
+    out[n] = '\0';
+}
 
 /**
  * Initialize command sender
@@ -80,7 +136,10 @@ bool queueCommand(uint64_t sensorId, uint8_t cmdType, const uint8_t* params, uin
     // Check if same command already queued for this sensor
     for (int i = 0; i < queueSize; i++) {
         if (commandQueue[i].sensorId == sensorId && commandQueue[i].cmdType == cmdType) {
-            Serial.println("⚠️  [CMD] Command already queued, updating timestamp");
+            Serial.println("⚠️  [CMD] Command already queued, replacing it");
+            // The earlier row in the command history is now superseded by the
+            // row the caller is about to insert for this request.
+            dbManager.writeCommandStatus(sensorId, cmdType, "superseded", commandQueue[i].retryCount);
             commandQueue[i].queuedAt = millis();
             commandQueue[i].retryCount = 0;
             commandQueue[i].paramLen = paramLen;
@@ -128,6 +187,8 @@ static void cleanExpiredCommands() {
         if (now - commandQueue[i].queuedAt > COMMAND_EXPIRATION_MS) {
             Serial.printf("⏰ [CMD] Command 0x%02X expired for sensor 0x%016llX\n", 
                           commandQueue[i].cmdType, commandQueue[i].sensorId);
+            dbManager.writeCommandStatus(commandQueue[i].sensorId, commandQueue[i].cmdType, "timeout",
+                                         commandQueue[i].retryCount, "no RX window within 30 minutes");
             removeQueuedAt(i);
         }
     }
@@ -171,7 +232,9 @@ void retryCommandsForSensor(uint64_t sensorId) {
                     break;
                 }
             }
+            rememberSent(pending[p]);
             UNLOCK_QUEUE();
+            dbManager.writeCommandStatus(sensorId, pending[p].cmdType, "sent", pending[p].retryCount);
         }
 
         // Small delay between retries
@@ -427,6 +490,78 @@ bool sendSetNameCommand(uint64_t sensorId, const char* name) {
     
     Serial.printf("\n📡 Sending SET_NAME command: %s\n", name);
     return sendCommand(sensorId, CMD_SET_NAME, (uint8_t*)name, nameLen);
+}
+
+/**
+ * Confirmation by observed effect (see header). Packets that arrived before
+ * the send cannot confirm it, which matters because the MQTT task transmits
+ * 3 s after the packet that opened the RX window and then processes that
+ * same packet.
+ */
+void confirmCommandsFromStatus(uint64_t sensorId, const StatusPayload* status, uint32_t packetReceivedMs) {
+    uint8_t confirmed[MAX_QUEUED_COMMANDS];
+    int confirmedCount = 0;
+
+    LOCK_QUEUE();
+    expireSentCommands(millis());
+    for (int i = sentCount - 1; i >= 0; i--) {
+        const SentCommand& s = sentCommands[i];
+        if (s.sensorId != sensorId) continue;
+        if ((int32_t)(packetReceivedMs - s.sentAt) <= 0) continue;  // packet predates the send
+
+        char value[41];
+        bool ok = false;
+        switch (s.cmdType) {
+            case CMD_STATUS:
+                ok = true;
+                break;
+            case CMD_SET_SLEEP:
+                sentParamsAsString(s, value, sizeof(value));
+                ok = (uint32_t)atoi(value) == status->deepSleepSec;
+                break;
+            case CMD_SET_INTERVAL:
+                sentParamsAsString(s, value, sizeof(value));
+                ok = (uint32_t)atoi(value) == status->sensorIntervalSec;
+                break;
+            case CMD_SET_NAME:
+                sentParamsAsString(s, value, sizeof(value));
+                ok = strncmp(value, status->deviceName, sizeof(status->deviceName)) == 0;
+                break;
+            default:
+                break;  // no observable proof for this command type
+        }
+        if (ok) {
+            confirmed[confirmedCount++] = s.cmdType;
+            removeSentAt(i);
+        }
+    }
+    UNLOCK_QUEUE();
+
+    for (int c = 0; c < confirmedCount; c++) {
+        Serial.printf("✅ [CMD] Command 0x%02X confirmed by status report from 0x%016llX\n", confirmed[c], sensorId);
+        dbManager.writeCommandStatus(sensorId, confirmed[c], "confirmed");
+    }
+}
+
+void confirmCommandsFromEvent(uint64_t sensorId, uint8_t eventType, uint32_t packetReceivedMs) {
+    if (eventType != EVENT_STARTUP) return;
+    bool confirmed = false;
+
+    LOCK_QUEUE();
+    expireSentCommands(millis());
+    for (int i = sentCount - 1; i >= 0; i--) {
+        const SentCommand& s = sentCommands[i];
+        if (s.sensorId != sensorId || s.cmdType != CMD_RESTART) continue;
+        if ((int32_t)(packetReceivedMs - s.sentAt) <= 0) continue;
+        removeSentAt(i);
+        confirmed = true;
+    }
+    UNLOCK_QUEUE();
+
+    if (confirmed) {
+        Serial.printf("✅ [CMD] Restart confirmed by startup event from 0x%016llX\n", sensorId);
+        dbManager.writeCommandStatus(sensorId, CMD_RESTART, "confirmed");
+    }
 }
 
 /**
