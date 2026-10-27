@@ -101,18 +101,28 @@ POST /api/commands
 Content-Type: application/json
 ```
 
-**Payload:**
+**Payload:** (`parameters` is JSON text, inserted into a JSONB column)
 ```json
 {
   "device_id": "12345678",
-  "command_type": 1,
-  "parameters": "90",
-  "status": "pending"
+  "command_type": 7,
+  "parameters": "{\"action\":\"set_interval\",\"value\":90}",
+  "status": "queued"
 }
 ```
 
 **Table:** `commands`  
-**Operation:** INSERT
+**Operation:** INSERT, returns `{"id": N}`
+
+```
+POST /api/commands/status
+```
+Moves the newest row for `device_id` + `command_type` in the expected prior status to a new one: `sent`, `timeout`, `superseded`, `failed` (from `queued`) or `confirmed` (from `sent`); optional `from`, `retry_count`, `error_message`. Stamps `sent_at` / `confirmed_at`.
+
+```
+GET /api/commands?limit=N
+```
+Recent command history joined with device names, including `sent_at`, `confirmed_at`, `retry_count`, `error_message`.
 
 ### 5. Events
 ```

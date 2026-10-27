@@ -15,6 +15,8 @@ LoRa-to-MQTT bridge for environmental sensor network.
 - **LoRa peer-to-peer receiver**: Continuous RX mode for sensor packets
 - **MQTT bridge**: Converts binary LoRa packets to JSON MQTT messages
 - **Command retry mechanism**: Persistent queue automatically retries commands until sensor receives them
+- **Command history**: Every command is recorded in PostgreSQL and tracked through `queued → sent → confirmed` (or `timeout` / `superseded`)
+- **Web admin dashboard**: Live readings, link quality, device health and remote control for every sensor, plus event and command history (HTTP Basic auth)
 - **Device auto-discovery**: Sensors automatically register with name and location
 - **Multi-sensor support**: Track up to 10 sensors simultaneously
 - **Device registry**: Auto-updates device names and locations from sensor status messages
@@ -135,20 +137,27 @@ cp include/secrets.h.example include/secrets.h
 nano include/secrets.h
 ```
 
-Fill in your MQTT broker details:
+Fill in your MQTT broker details and the dashboard login:
 ```cpp
 #define MQTT_SERVER "192.168.1.100"
 #define MQTT_PORT 1883
 #define MQTT_USER "your-username"      // Optional
 #define MQTT_PASSWORD "your-password"  // Optional
+
+// Web dashboard login (leave both undefined for an open dashboard)
+#define WEB_AUTH_USER "admin"
+#define WEB_AUTH_PASS "change-me"
 ```
 
 ### 2. Build and Upload
 
 ```bash
-pio run -t upload        # Upload firmware
-pio run -t uploadfs      # Upload filesystem (device registry)
+pio run -e esp32-lora-gateway-usb -t upload   # First flash over USB (/dev/ttyUSB0)
+pio run -t upload                             # Later updates over the air (esp32-lora-gateway.local)
+pio run -t uploadfs                           # Upload filesystem (device registry)
 ```
+
+The build reads `PG_*` from the environment for the `-D PG_*` flags; set placeholders if you do not use them.
 
 ### 3. Configure WiFi
 
@@ -235,26 +244,38 @@ Your monitoring system
 ### Command Flow (with Retry Mechanism)
 
 ```
-MQTT command → lora/command
+MQTT command (lora/command) or dashboard POST /api/command
     ↓
-Gateway receives and queues command (5 min expiration)
+Gateway queues command (30 min expiration)        → history row: queued
     ↓
 Sensor transmits data packet
     ↓
-Gateway receives packet, opens sensor's RX window
+Gateway waits ~3 s for the sensor's RX window, then transmits
     ↓
-Gateway retries queued command via LoRa
+Sensor receives during RX window and executes      → history row: sent
     ↓
-Sensor receives during RX window and executes
-    ↓
-Gateway removes command from queue on success
+Sensor's next status report echoes the new value   → history row: confirmed
 ```
 
 **Key features:**
-- Commands persist in queue until received or expired (5 minutes)
-- Automatic retry on every sensor transmission
+- Commands persist in the RAM queue until sent or expired (30 minutes → `timeout`)
+- Automatic retry on every sensor transmission; the radio is only ever driven from the MQTT task
+- Queuing the same command type again for a sensor replaces the pending one (`superseded`)
 - Sensor only listens briefly after each transmission
-- Thread-safe radio access with FreeRTOS mutex
+- Thread-safe radio and queue access with FreeRTOS mutexes
+
+**Command history lifecycle** (PostgreSQL `commands` table, shown on the dashboard):
+
+| Status | Meaning |
+|---|---|
+| `queued` | Accepted by the gateway, waiting for the sensor's RX window |
+| `failed` | Rejected by the gateway (queue full) |
+| `sent` | Transmitted over LoRa (`sent_at`, `retry_count`) |
+| `confirmed` | A later status report echoed the new sleep / interval / name, or a startup event followed a restart |
+| `timeout` | Not sent within 30 minutes |
+| `superseded` | Replaced by a newer command of the same type |
+
+Sensors do not acknowledge commands, so `status` requests and calibration commands stop at `sent`.
 
 ## Supported Commands
 
@@ -379,7 +400,31 @@ When the gateway receives and processes a command, it publishes an acknowledgmen
 **Status values:**
 - `queued`: Command queued for retry (will be sent when sensor opens RX window)
 - Command will be retried automatically on every sensor transmission
-- Commands expire after 5 minutes if not received
+- Commands expire after 30 minutes if not sent
+
+The MQTT ack only says the gateway accepted the command. Delivery is tracked in the command history (see Command Flow above and the dashboard).
+
+## Web Admin Dashboard
+
+The gateway serves an admin dashboard on port 80 (`http://esp32-lora-gateway.local/`). It requires the HTTP Basic credentials from `secrets.h` when `WEB_AUTH_USER` / `WEB_AUTH_PASS` are defined.
+
+**Sidebar:** WiFi, MQTT broker and database API status, IP, signal, uptime, free memory, LoRa radio parameters, firmware version, online/total sensors.
+
+**Sensor cards:** last readings (temperature, humidity, pressure with trend, battery, GPS with map link), device health from the last status report, link quality, packet counts, the live command queue, and controls: request status, restart, calibrate / set / clear pressure baseline (BME280), deep sleep, sensor interval, rename, remove from registry. A sensor is ONLINE when heard within twice its reporting period; one not heard since the gateway booted says so.
+
+**Command History** and **Recent Events** come from the database API. The gateway refreshes them from its main loop while a dashboard is open, so no HTTP request is made from the web server's own task.
+
+**API** (same auth):
+
+| Route | Purpose |
+|---|---|
+| `GET /api/gateway` | Gateway status JSON |
+| `GET /api/devices` | Registry snapshot with readings, health, `online`, queue |
+| `GET /api/events`, `GET /api/commands` | Cached history from the database API |
+| `POST /api/command` | `{"device_id":"<hex>","action":"set_interval","value":90}`; actions: `status`, `restart`, `calibrate`, `set_baseline`, `clear_baseline`, `set_sleep`, `set_interval`, `set_name` |
+| `DELETE /api/device?id=<hex>` | Remove a device from the registry |
+
+Everything shown from a device or the database is HTML-escaped; device names are remotely settable, so treat them as untrusted.
 
 ## Device Registry
 
@@ -478,8 +523,8 @@ pio run -t clean
 After initial USB flash, you can update over WiFi:
 
 ```bash
-# Via PlatformIO
-pio run -t upload --upload-port esp32-lora-gateway.local
+# Via PlatformIO (upload_port is already esp32-lora-gateway.local in platformio.ini)
+pio run -t upload
 
 # Or use Arduino IDE OTA
 ```
