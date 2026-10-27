@@ -2,6 +2,39 @@
 #define DEVICE_REGISTRY_H
 
 #include <Arduino.h>
+#include "lora_protocol.h"
+
+// Last sensor reading received from a device (decoded ReadingsPayload)
+struct DeviceReading {
+    bool     valid;           // At least one readings packet received
+    uint32_t receivedAt;      // millis() when received
+    float    temperature;     // °C
+    float    humidity;        // %RH (0 for DS18B20)
+    float    pressureHpa;     // hPa (0 for non-BME280)
+    float    pressureChange;  // hPa change from baseline
+    uint8_t  pressureTrend;   // 0=falling, 1=steady, 2=rising
+    float    batteryVoltage;  // V
+    uint8_t  batteryPercent;  // %
+    bool     gpsFix;          // lat/lon non-zero
+    float    gpsLatitude;
+    float    gpsLongitude;
+    int16_t  gpsAltitude;     // m
+    uint8_t  gpsSatellites;
+    float    gpsHdop;
+};
+
+// Last device health report (decoded StatusPayload)
+struct DeviceHealth {
+    bool     valid;           // At least one status packet received
+    uint32_t receivedAt;      // millis() when received
+    uint32_t uptimeSec;
+    uint16_t wakeCount;
+    bool     sensorHealthy;
+    uint16_t freeHeapKb;
+    uint16_t sensorFailures;
+    uint16_t txFailures;
+    int8_t   txPower;         // dBm
+};
 
 // Device information
 struct DeviceInfo {
@@ -18,6 +51,8 @@ struct DeviceInfo {
     uint8_t bufferIndex;      // Circular buffer index
     uint16_t sensorInterval;  // Sensor reading interval (seconds)
     uint16_t deepSleepSec;    // Deep sleep duration (seconds)
+    DeviceReading reading;    // Last decoded readings packet
+    DeviceHealth health;      // Last decoded status packet
 };
 
 // Thread-safe access functions
@@ -55,6 +90,12 @@ void updateDeviceConfig(uint64_t deviceId, uint16_t sensorInterval, uint16_t dee
 
 // Update device sensor type (BME280, DS18B20, etc.)
 void updateDeviceSensorType(uint64_t deviceId, const char* sensorType);
+
+// Cache the last decoded readings packet (shown on the dashboard)
+void updateDeviceReadings(uint64_t deviceId, const ReadingsPayload* readings);
+
+// Cache the last decoded status packet (shown on the dashboard)
+void updateDeviceHealth(uint64_t deviceId, const StatusPayload* status);
 
 // Get device sensor type
 String getDeviceSensorType(uint64_t deviceId);

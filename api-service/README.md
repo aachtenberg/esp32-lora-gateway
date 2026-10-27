@@ -160,7 +160,9 @@ Environment variables:
 - `GET /api/health` - Health check
 - `POST /api/devices` - Device updates (UPSERT)
 - `POST /api/packets` - Packet history (INSERT)
-- `POST /api/commands` - Commands (INSERT)
+- `GET /api/commands?limit=N` - Recent command history with device names (newest first)
+- `POST /api/commands` - Commands (INSERT; `parameters` must be a JSON string)
+- `GET /api/events?limit=N` - Recent events with device names
 - `POST /api/events` - Events (INSERT)
 
 See [TELEGRAF_SPEC.md](../docs/TELEGRAF_SPEC.md) for payload formats.

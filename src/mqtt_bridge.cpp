@@ -187,8 +187,9 @@ void publishReadings(const ReceivedPacket* packet) {
     const char* sensorType = detectSensorType(readings);
     bool isDS18B20 = (strcmp(sensorType, "DS18B20") == 0);
 
-    // Update device registry with sensor type
+    // Update device registry with sensor type and the decoded reading
     updateDeviceSensorType(packet->header.deviceId, sensorType);
+    updateDeviceReadings(packet->header.deviceId, readings);
 
     // Get device name and ID
     String deviceName = getDeviceName(packet->header.deviceId);
@@ -298,8 +299,9 @@ void publishStatus(const ReceivedPacket* packet) {
         }
     }
     
-    // Update device config values in registry
+    // Update device config values and health snapshot in registry
     updateDeviceConfig(packet->header.deviceId, status->sensorIntervalSec, status->deepSleepSec);
+    updateDeviceHealth(packet->header.deviceId, status);
     
     // Get device name and ID (may have just been updated)
     String deviceName = getDeviceName(packet->header.deviceId);
@@ -532,6 +534,10 @@ void mqttCallback(char* topic, byte* payload, unsigned int length) {
 /**
  * Reconnect to MQTT broker
  */
+bool isMqttConnected() {
+    return mqttClient.connected();
+}
+
 bool reconnectMqtt() {
     Serial.print("[MQTT] Connecting to broker... ");
     

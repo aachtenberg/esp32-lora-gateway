@@ -154,6 +154,9 @@ void loop() {
     // Handle database operations
     dbManager.loop();
 
+    // Refresh dashboard caches (events/command history from the API)
+    webServerLoop();
+
     // Check WiFi connection
     static uint32_t lastWiFiCheck = 0;
     if (millis() - lastWiFiCheck > 30000) {  // Check every 30 seconds

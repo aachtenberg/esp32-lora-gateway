@@ -284,6 +284,8 @@ void addDevice(uint64_t deviceId, const String& name, const String& location) {
     devices[deviceCount].bufferIndex = 0;
     devices[deviceCount].sensorInterval = 60;  // Default
     devices[deviceCount].deepSleepSec = 90;    // Default
+    memset(&devices[deviceCount].reading, 0, sizeof(DeviceReading));
+    memset(&devices[deviceCount].health, 0, sizeof(DeviceHealth));
     
     // Clear deduplication buffer (set to invalid sequence numbers)
     for (int j = 0; j < DEDUP_BUFFER_SIZE; j++) {
@@ -362,6 +364,56 @@ void updateDeviceSensorType(uint64_t deviceId, const char* sensorType) {
         }
     }
 
+    UNLOCK_REGISTRY();
+}
+
+/**
+ * Cache the last decoded readings packet for the dashboard
+ */
+void updateDeviceReadings(uint64_t deviceId, const ReadingsPayload* readings) {
+    LOCK_REGISTRY();
+    for (int i = 0; i < deviceCount; i++) {
+        if (devices[i].deviceId != deviceId) continue;
+        DeviceReading& r = devices[i].reading;
+        r.valid = true;
+        r.receivedAt = millis();
+        r.temperature = readings->temperature / 100.0f;
+        r.humidity = readings->humidity / 100.0f;
+        r.pressureHpa = readings->pressure / 100.0f;
+        r.pressureChange = readings->pressureChange / 100.0f;
+        r.pressureTrend = readings->pressureTrend;
+        r.batteryVoltage = readings->batteryVoltage / 1000.0f;
+        r.batteryPercent = readings->batteryPercent;
+        r.gpsFix = (readings->gpsLatitude != 0 || readings->gpsLongitude != 0);
+        r.gpsLatitude = readings->gpsLatitude / 1000000.0f;
+        r.gpsLongitude = readings->gpsLongitude / 1000000.0f;
+        r.gpsAltitude = readings->gpsAltitude;
+        r.gpsSatellites = readings->gpsSatellites;
+        r.gpsHdop = readings->gpsHdop / 10.0f;
+        break;
+    }
+    UNLOCK_REGISTRY();
+}
+
+/**
+ * Cache the last decoded status packet for the dashboard
+ */
+void updateDeviceHealth(uint64_t deviceId, const StatusPayload* status) {
+    LOCK_REGISTRY();
+    for (int i = 0; i < deviceCount; i++) {
+        if (devices[i].deviceId != deviceId) continue;
+        DeviceHealth& h = devices[i].health;
+        h.valid = true;
+        h.receivedAt = millis();
+        h.uptimeSec = status->uptime;
+        h.wakeCount = status->wakeCount;
+        h.sensorHealthy = status->sensorHealthy != 0;
+        h.freeHeapKb = status->freeHeap;
+        h.sensorFailures = status->sensorFailures;
+        h.txFailures = status->txFailures;
+        h.txPower = status->txPower;
+        break;
+    }
     UNLOCK_REGISTRY();
 }
 
@@ -572,6 +624,58 @@ String getDeviceRegistrySnapshot() {
         deviceObj["lastSequence"] = devices[i].lastSequence;
         deviceObj["sensorInterval"] = devices[i].sensorInterval;
         deviceObj["deepSleepSec"] = devices[i].deepSleepSec;
+
+        // Online = seen within twice the expected reporting period (plus margin).
+        // A sleeping sensor reports roughly once per deep-sleep cycle.
+        uint32_t period = devices[i].deepSleepSec > devices[i].sensorInterval
+                              ? devices[i].deepSleepSec : devices[i].sensorInterval;
+        if (period == 0) period = 300;
+        uint32_t onlineWindow = period * 2 + 30;
+        deviceObj["expectedPeriodSec"] = period;
+        deviceObj["online"] = elapsedSeconds <= onlineWindow;
+
+        // Last decoded readings
+        const DeviceReading& r = devices[i].reading;
+        if (r.valid) {
+            JsonObject reading = deviceObj["reading"].to<JsonObject>();
+            reading["ageSeconds"] = (currentMillis - r.receivedAt) / 1000;
+            reading["temperature"] = serialized(String(r.temperature, 2));
+            if (devices[i].sensorType != "DS18B20") {
+                reading["humidity"] = serialized(String(r.humidity, 1));
+            }
+            if (devices[i].sensorType == "BME280") {
+                reading["pressure"] = serialized(String(r.pressureHpa, 1));
+                reading["pressureChange"] = serialized(String(r.pressureChange, 2));
+                reading["pressureTrend"] = r.pressureTrend;
+            }
+            reading["batteryVoltage"] = serialized(String(r.batteryVoltage, 2));
+            reading["batteryPercent"] = r.batteryPercent;
+            if (r.gpsFix || r.gpsSatellites > 0) {
+                JsonObject gps = reading["gps"].to<JsonObject>();
+                gps["fix"] = r.gpsFix;
+                gps["satellites"] = r.gpsSatellites;
+                gps["hdop"] = serialized(String(r.gpsHdop, 1));
+                if (r.gpsFix) {
+                    gps["latitude"] = serialized(String(r.gpsLatitude, 6));
+                    gps["longitude"] = serialized(String(r.gpsLongitude, 6));
+                    gps["altitude"] = r.gpsAltitude;
+                }
+            }
+        }
+
+        // Last decoded status report
+        const DeviceHealth& h = devices[i].health;
+        if (h.valid) {
+            JsonObject health = deviceObj["health"].to<JsonObject>();
+            health["ageSeconds"] = (currentMillis - h.receivedAt) / 1000;
+            health["uptimeSec"] = h.uptimeSec;
+            health["wakeCount"] = h.wakeCount;
+            health["sensorHealthy"] = h.sensorHealthy;
+            health["freeHeapKb"] = h.freeHeapKb;
+            health["sensorFailures"] = h.sensorFailures;
+            health["txFailures"] = h.txFailures;
+            health["txPower"] = h.txPower;
+        }
         
         // Add command queue info
         deviceObj["cmdQueueCount"] = getQueuedCommandCount(devices[i].deviceId);

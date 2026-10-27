@@ -186,6 +186,66 @@ func devicesHandler(w http.ResponseWriter, r *http.Request) {
 // This API handles device registry and management only
 
 func commandsHandler(w http.ResponseWriter, r *http.Request) {
+	if r.Method == http.MethodGet {
+		// GET: Fetch recent command history (newest first)
+		limit := r.URL.Query().Get("limit")
+		if limit == "" {
+			limit = "50"
+		}
+
+		query := `
+			SELECT c.id, c.device_id, d.name, c.command_type, COALESCE(c.parameters, '{}'::jsonb),
+			       c.status, c.created_at
+			FROM commands c
+			LEFT JOIN devices d ON c.device_id = d.device_id
+			ORDER BY c.created_at DESC
+			LIMIT $1
+		`
+
+		rows, err := db.Query(query, limit)
+		if err != nil {
+			http.Error(w, "Database error", http.StatusInternalServerError)
+			log.Printf("Failed to fetch commands: %v", err)
+			return
+		}
+		defer rows.Close()
+
+		type CommandResponse struct {
+			ID          int             `json:"id"`
+			DeviceID    string          `json:"device_id"`
+			DeviceName  string          `json:"device_name"`
+			CommandType int             `json:"command_type"`
+			Parameters  json.RawMessage `json:"parameters"`
+			Status      string          `json:"status"`
+			CreatedAt   string          `json:"created_at"`
+		}
+
+		commands := []CommandResponse{}
+		for rows.Next() {
+			var c CommandResponse
+			var deviceName *string
+			var params []byte
+			if err := rows.Scan(&c.ID, &c.DeviceID, &deviceName, &c.CommandType, &params, &c.Status, &c.CreatedAt); err != nil {
+				log.Printf("Error scanning command: %v", err)
+				continue
+			}
+			if deviceName != nil {
+				c.DeviceName = *deviceName
+			} else {
+				c.DeviceName = "Unknown"
+			}
+			if len(params) == 0 {
+				params = []byte("{}")
+			}
+			c.Parameters = json.RawMessage(params)
+			commands = append(commands, c)
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(commands)
+		return
+	}
+
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
 		return
