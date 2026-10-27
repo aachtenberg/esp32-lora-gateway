@@ -217,3 +217,16 @@ docker logs -f esp32-lora-api
 **503 on /api/health:**
 - Database connection failed
 - Check DB_HOST and credentials
+
+## Deployment (k3s)
+
+The service runs as the `esp32-lora-api` Deployment in the `iot` namespace of the
+homelab k3s cluster (manifest: `homelab-infra/k3s/base/iot/esp32-lora-api.yml`,
+applied by ArgoCD). The image is built locally on the Pi and imported into k3s
+containerd (`imagePullPolicy: Never`). Ship a code change with:
+
+```bash
+./deploy.sh
+```
+
+See the script for the individual steps and the rollback command.

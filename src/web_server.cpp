@@ -486,7 +486,8 @@ const char index_html[] PROGMEM = R"rawliteral(
             return '<table><thead><tr>' + headers.map(h => '<th>' + esc(h) + '</th>').join('') + '</tr></thead><tbody>' + rows.join('') + '</tbody></table>';
         }
         function unavailable(el, what) {
-            el.innerHTML = '<p class="empty-note">' + what + ' unavailable (database API not reachable)</p>';
+            el.innerHTML = '<p class="empty-note">' + what + ' unavailable: the gateway could not fetch it from the database API. '
+                + 'It retries every 10 s; if this persists, check that the API service is running and up to date.</p>';
         }
 
         function loadEvents() {
