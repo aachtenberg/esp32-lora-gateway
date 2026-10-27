@@ -58,6 +58,7 @@ type CommandStatusPayload struct {
 	DeviceID     string  `json:"device_id"`
 	CommandType  int16   `json:"command_type"`
 	Status       string  `json:"status"`
+	From         string  `json:"from,omitempty"` // row status to match; defaults per transition
 	RetryCount   *int    `json:"retry_count,omitempty"`
 	ErrorMessage *string `json:"error_message,omitempty"`
 }
@@ -299,11 +300,20 @@ func commandsHandler(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]int{"id": id})
 }
 
-// commandStatusHandler moves the most recent open command for a device+type
-// through its lifecycle: queued -> sent -> confirmed, or queued/sent ->
-// timeout | superseded | failed. sent_at / confirmed_at are stamped on the
-// matching transition. A request that matches no open row is not an error
-// (the row may have been inserted while the gateway was offline).
+// commandStatusHandler moves one command row for a device+type through its
+// lifecycle. Each transition targets the newest row in a specific prior
+// status, so two open rows of the same type (one sent, one queued behind it)
+// are never confused:
+//
+//	sent                 <- queued
+//	confirmed            <- sent
+//	timeout, superseded,
+//	failed               <- queued (or "from":"sent" when a newer command of
+//	                        the same type was transmitted over an unconfirmed one)
+//
+// sent_at / confirmed_at are stamped on the matching transition. A request
+// that matches no row is not an error (the row may have been inserted while
+// the gateway was offline).
 func commandStatusHandler(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
@@ -317,10 +327,22 @@ func commandStatusHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	from := payload.From
 	switch payload.Status {
-	case "sent", "confirmed", "timeout", "superseded", "failed":
+	case "sent", "timeout", "superseded", "failed":
+		if from == "" {
+			from = "queued"
+		}
+	case "confirmed":
+		if from == "" {
+			from = "sent"
+		}
 	default:
 		http.Error(w, "Invalid status", http.StatusBadRequest)
+		return
+	}
+	if from != "queued" && from != "sent" {
+		http.Error(w, "Invalid from status", http.StatusBadRequest)
 		return
 	}
 
@@ -335,7 +357,7 @@ func commandStatusHandler(w http.ResponseWriter, r *http.Request) {
 			confirmed_at = CASE WHEN $3::text = 'confirmed' THEN NOW() ELSE confirmed_at END
 		WHERE id = (
 			SELECT id FROM commands
-			WHERE device_id = $1 AND command_type = $2 AND status IN ('queued', 'sent')
+			WHERE device_id = $1 AND command_type = $2 AND status = $6::text
 			ORDER BY created_at DESC
 			LIMIT 1
 		)
@@ -343,7 +365,7 @@ func commandStatusHandler(w http.ResponseWriter, r *http.Request) {
 
 	res, err := db.Exec(query,
 		payload.DeviceID, payload.CommandType, payload.Status,
-		payload.RetryCount, payload.ErrorMessage)
+		payload.RetryCount, payload.ErrorMessage, from)
 	if err != nil {
 		http.Error(w, "Database error", http.StatusInternalServerError)
 		log.Printf("Failed to update command status: %v", err)
@@ -351,7 +373,7 @@ func commandStatusHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	n, _ := res.RowsAffected()
 
-	log.Printf("Command status: device=%s type=%d -> %s (%d row)", payload.DeviceID, payload.CommandType, payload.Status, n)
+	log.Printf("Command status: device=%s type=%d %s -> %s (%d row)", payload.DeviceID, payload.CommandType, from, payload.Status, n)
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]int64{"updated": n})
 }

@@ -90,15 +90,17 @@ void DatabaseManager::attemptConnection() {
 }
 
 /**
- * Drain queued writes in FIFO order. Only this task pops, so the front entry
- * can be copied out, posted with the lock released, and popped afterwards.
- * Bounded by DRAIN_BUDGET_MS per pass and feeds the watchdog between posts so
- * a slow API cannot starve the main loop.
+ * Drain queued writes in FIFO order. The head entry is popped under the lock
+ * before the POST so no other task can touch it (queueWrite() drops the
+ * oldest entry on overflow, which must never be the record in flight). If the
+ * POST does not succeed and the entry should be retried, it is pushed back to
+ * the front. Bounded by DRAIN_BUDGET_MS per pass and feeds the watchdog
+ * between posts so a slow API cannot starve the main loop.
  *
- * Outcomes: OK and REJECTED (4xx) pop the entry. SERVER_ERROR (5xx) keeps
- * the entry for a retry but drops it after MAX_HEAD_FAILURES so one bad
- * record cannot block everything behind it; the API answered, so we stay
- * connected. Only UNREACHABLE (no HTTP response) marks the API disconnected.
+ * Outcomes: OK and REJECTED (4xx) finish the entry. SERVER_ERROR (5xx) retries
+ * it, dropping it after MAX_HEAD_FAILURES so one bad record cannot block
+ * everything behind it; the API answered, so we stay connected. Only
+ * UNREACHABLE (no HTTP response) marks the API disconnected.
  */
 void DatabaseManager::processWriteQueue() {
     uint32_t started = millis();
@@ -108,36 +110,39 @@ void DatabaseManager::processWriteQueue() {
         PendingWrite write;
         LOCK_WRITES();
         bool have = !writeQueue.empty();
-        if (have) write = writeQueue.front();
+        if (have) {
+            write = writeQueue.front();
+            writeQueue.pop_front();
+        }
         UNLOCK_WRITES();
         if (!have) break;
 
         esp_task_wdt_reset();
         PostResult result = postJson(write.endpoint, write.doc);
 
-        if (result == POST_UNREACHABLE) {
-            Serial.println("⚠️  Database API unreachable, marking disconnected");
-            status = DB_DISCONNECTED;
-            break;
+        if (result == POST_OK || result == POST_REJECTED) {
+            headFailures = 0;
+            if (result == POST_OK) processed++;
+            continue;
         }
 
-        bool drop = (result == POST_OK || result == POST_REJECTED);
         if (result == POST_SERVER_ERROR) {
             headFailures++;
             if (headFailures >= MAX_HEAD_FAILURES) {
                 Serial.printf("⚠️  Dropping %s after %d server errors\n", write.endpoint.c_str(), headFailures);
-                drop = true;
-            } else {
-                break;  // retry this entry on the next pass
+                headFailures = 0;
+                continue;
             }
+        } else {
+            Serial.println("⚠️  Database API unreachable, marking disconnected");
+            status = DB_DISCONNECTED;
         }
-        if (drop) {
-            headFailures = 0;
-            LOCK_WRITES();
-            if (!writeQueue.empty()) writeQueue.pop();
-            UNLOCK_WRITES();
-            if (result == POST_OK) processed++;
-        }
+
+        // Retry this entry later: put it back at the head
+        LOCK_WRITES();
+        writeQueue.push_front(write);
+        UNLOCK_WRITES();
+        break;
     }
     esp_task_wdt_reset();
 
@@ -211,12 +216,13 @@ bool DatabaseManager::queueWrite(const String& endpoint, const JsonDocument& doc
 
     LOCK_WRITES();
     if (writeQueue.size() >= MAX_QUEUE_SIZE) {
-        // Drop oldest to prevent memory overflow
-        writeQueue.pop();
+        // Drop the oldest queued record. The record in flight was already
+        // popped by processWriteQueue(), so it is never the one dropped.
+        writeQueue.pop_front();
         failedWrites++;
         Serial.println("⚠️  Write queue full, dropping oldest");
     }
-    writeQueue.push(write);
+    writeQueue.push_back(write);
     UNLOCK_WRITES();
     return true;
 }
@@ -271,7 +277,7 @@ bool DatabaseManager::writeCommand(uint64_t deviceId, uint8_t commandType, const
 }
 
 bool DatabaseManager::writeCommandStatus(uint64_t deviceId, uint8_t commandType, const char* statusStr,
-                                         int retryCount, const String& errorMessage) {
+                                         int retryCount, const String& errorMessage, const char* fromStatus) {
 #if !DB_API_ENABLED
     return false;
 #endif
@@ -284,6 +290,7 @@ bool DatabaseManager::writeCommandStatus(uint64_t deviceId, uint8_t commandType,
     doc["status"] = statusStr;
     if (retryCount >= 0) doc["retry_count"] = retryCount;
     if (errorMessage.length() > 0) doc["error_message"] = errorMessage;
+    if (fromStatus) doc["from"] = fromStatus;
 
     return queueWrite("/commands/status", doc);
 }

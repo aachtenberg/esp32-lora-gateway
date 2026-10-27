@@ -268,7 +268,7 @@ const char index_html[] PROGMEM = R"rawliteral(
             <div class="section">
                 <div class="section-header">
                     <h2>Command History</h2>
-                    <div class="description">queued → sent on the sensor's next RX window → confirmed when a later report shows the effect (status, sleep, interval, name, restart). Calibration commands stop at sent. Unsent commands time out after 30 min.</div>
+                    <div class="description">queued → sent on the sensor's next RX window → confirmed when a later status report echoes the new sleep, interval or name, or a startup event follows a restart (any reboot within 15 min counts). Status and calibration commands stop at sent. Unsent commands time out after 30 min.</div>
                 </div>
                 <div id="commands" class="table-wrap"><div class="loading"><div class="spinner"></div></div></div>
             </div>

@@ -70,13 +70,17 @@ static void expireSentCommands(uint32_t now) {
     }
 }
 
-// Caller holds queueMutex. Replaces an older entry for the same sensor+type.
-static void rememberSent(const QueuedCommand& cmd) {
+// Caller holds queueMutex. Replaces an older entry for the same sensor+type;
+// returns true if one was displaced (its DB row can no longer be confirmed and
+// the caller marks it superseded).
+static bool rememberSent(const QueuedCommand& cmd) {
     uint32_t now = millis();
     expireSentCommands(now);
+    bool displaced = false;
     for (int i = 0; i < sentCount; i++) {
         if (sentCommands[i].sensorId == cmd.sensorId && sentCommands[i].cmdType == cmd.cmdType) {
             removeSentAt(i);
+            displaced = true;
             break;
         }
     }
@@ -87,6 +91,7 @@ static void rememberSent(const QueuedCommand& cmd) {
     s.paramLen = cmd.paramLen < sizeof(s.params) ? cmd.paramLen : sizeof(s.params);
     memcpy(s.params, cmd.params, s.paramLen);
     s.sentAt = now;
+    return displaced;
 }
 
 // Caller holds queueMutex. Null-terminated copy of a sent command's params.
@@ -224,17 +229,36 @@ void retryCommandsForSensor(uint64_t sensorId) {
                                    pending[p].params, pending[p].paramLen);
 
         if (success) {
-            Serial.printf("✅ [CMD] Command sent, removing from queue\n");
+            // The lock was released during TX, so the queue entry may have been
+            // replaced by a newer command of the same type (queuedAt differs).
+            // Only the entry we actually sent is removed; a replacement stays
+            // queued for the next RX window and its row keeps its own history.
+            bool stillOurs = false;
+            bool displacedSent = false;
             LOCK_QUEUE();
             for (int i = 0; i < queueSize; i++) {
                 if (commandQueue[i].sensorId == sensorId && commandQueue[i].cmdType == pending[p].cmdType) {
-                    removeQueuedAt(i);
+                    if (commandQueue[i].queuedAt == pending[p].queuedAt) {
+                        removeQueuedAt(i);
+                        stillOurs = true;
+                    }
                     break;
                 }
             }
-            rememberSent(pending[p]);
+            if (stillOurs) displacedSent = rememberSent(pending[p]);
             UNLOCK_QUEUE();
-            dbManager.writeCommandStatus(sensorId, pending[p].cmdType, "sent", pending[p].retryCount);
+
+            if (stillOurs) {
+                Serial.printf("✅ [CMD] Command sent, removing from queue\n");
+                if (displacedSent) {
+                    // An earlier unconfirmed send of the same type can no longer be confirmed
+                    dbManager.writeCommandStatus(sensorId, pending[p].cmdType, "superseded", -1, String(), "sent");
+                }
+                dbManager.writeCommandStatus(sensorId, pending[p].cmdType, "sent", pending[p].retryCount);
+            } else {
+                Serial.printf("ℹ️  [CMD] Command 0x%02X was replaced while transmitting; replacement stays queued\n",
+                              pending[p].cmdType);
+            }
         }
 
         // Small delay between retries
@@ -496,7 +520,7 @@ bool sendSetNameCommand(uint64_t sensorId, const char* name) {
  * Confirmation by observed effect (see header). Packets that arrived before
  * the send cannot confirm it, which matters because the MQTT task transmits
  * 3 s after the packet that opened the RX window and then processes that
- * same packet.
+ * same packet. Only commands whose value is echoed back are confirmed here.
  */
 void confirmCommandsFromStatus(uint64_t sensorId, const StatusPayload* status, uint32_t packetReceivedMs) {
     uint8_t confirmed[MAX_QUEUED_COMMANDS];
@@ -512,9 +536,7 @@ void confirmCommandsFromStatus(uint64_t sensorId, const StatusPayload* status, u
         char value[41];
         bool ok = false;
         switch (s.cmdType) {
-            case CMD_STATUS:
-                ok = true;
-                break;
+            // CMD_STATUS is deliberately absent: sensors report status unprompted
             case CMD_SET_SLEEP:
                 sentParamsAsString(s, value, sizeof(value));
                 ok = (uint32_t)atoi(value) == status->deepSleepSec;

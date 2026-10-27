@@ -4,7 +4,7 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 #include <HTTPClient.h>
-#include <queue>
+#include <deque>
 #include <vector>
 
 enum DatabaseStatus {
@@ -51,11 +51,15 @@ public:
     bool writeCommand(uint64_t deviceId, uint8_t commandType, const String& params,
                      const String& status);
 
-    // Move the most recent open command for deviceId+commandType to a new status:
-    // "sent", "confirmed", "timeout", "superseded" or "failed".
-    // retryCount < 0 leaves the stored count unchanged; empty errorMessage is not sent.
+    // Move a command row for deviceId+commandType to a new status: "sent",
+    // "confirmed", "timeout", "superseded" or "failed". The API picks the newest
+    // row in the expected prior status (sent<-queued, confirmed<-sent, others
+    // <-queued); fromStatus overrides that, e.g. "sent" to supersede an
+    // unconfirmed sent command. retryCount < 0 leaves the stored count unchanged;
+    // an empty errorMessage is not sent.
     bool writeCommandStatus(uint64_t deviceId, uint8_t commandType, const char* status,
-                            int retryCount = -1, const String& errorMessage = String());
+                            int retryCount = -1, const String& errorMessage = String(),
+                            const char* fromStatus = nullptr);
 
     bool writeEvent(uint64_t deviceId, uint8_t eventType, uint8_t severity,
                    const String& message);
@@ -68,7 +72,7 @@ public:
 private:
     HTTPClient http;                 // used only from loop()
     volatile DatabaseStatus status;
-    std::queue<PendingWrite> writeQueue;
+    std::deque<PendingWrite> writeQueue;  // front = oldest; only loop() pops
     SemaphoreHandle_t queueMutex;
     uint32_t lastReconnectAttempt;
     uint32_t failedWrites;
